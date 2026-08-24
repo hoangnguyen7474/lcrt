@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/lcrt-core"]
+members = ["crates/lcrt-audio-pipewire", "crates/lcrt-core"]
 resolver = "3"
 
 [workspace.package]
