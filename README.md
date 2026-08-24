@@ -24,3 +24,18 @@ cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-features
 ```
+
+### Linux audio development
+
+PipeWire capture development requires `libpipewire-0.3-dev`,
+`libspa-0.2-dev`, and `pkg-config`. The bounded diagnostic utility enumerates
+both microphone sources and system-output monitor targets:
+
+```sh
+cargo run -p lcrt-audio-pipewire --bin lcrt-pw-capture -- list
+cargo run -p lcrt-audio-pipewire --bin lcrt-pw-capture -- capture <source-id> 3
+```
+
+The capture duration is clamped to 1–30 seconds. The utility reports negotiated
+format and aggregate sample statistics; it neither records audio to disk nor
+silently substitutes synthetic audio when PipeWire fails.
