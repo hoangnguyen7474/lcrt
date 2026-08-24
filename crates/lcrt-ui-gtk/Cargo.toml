@@ -1,0 +1,16 @@
+[package]
+name = "lcrt-ui-gtk"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+gtk = { package = "gtk4", version = "0.10.3" }
+lcrt-core = { path = "../lcrt-core" }
+libadwaita = { version = "0.8.0", features = ["v1_4"] }
