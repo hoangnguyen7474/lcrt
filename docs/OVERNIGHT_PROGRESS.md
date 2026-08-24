@@ -13,6 +13,7 @@ Updated: 2026-08-25 (Asia/Ho_Chi_Minh)
 - Milestone 6 — Quality and latency pass (PR #9).
 - Milestone 7 — Portability preparation (PR #10).
 - Milestone 8 — Native overlay presentation (PR #13).
+- PR #13 review reconciliation (PR #14).
 - Final overnight report (PR #11).
 - Terminal state reconciliation (PR #12).
 
@@ -29,10 +30,11 @@ Updated: 2026-08-25 (Asia/Ho_Chi_Minh)
 - #11 — final factual overnight report.
 - #12 — terminal progress/report reconciliation.
 - #13 — translucent, capability-based native overlay presentation.
+- #14 — protocol-v4 focus gate, explicit overlay sizing, and final review fixes.
 
 ## Current milestone
 
-- PR #13 review reconciliation (PR #14): local verification complete; CI/review pending.
+- Overnight run complete; no active milestone.
 
 ## Tests actually run
 
@@ -57,6 +59,8 @@ Updated: 2026-08-25 (Asia/Ho_Chi_Minh)
 - Milestone 8 PR #13 CI attempt 1: both portable-core checks passed; the Ubuntu gate failed before Rust setup because Ubuntu 24.04 does not package `libgtk4-layer-shell-dev`. The workflow now builds checksum-pinned gtk4-layer-shell 1.0.4 from source; its exact Meson configuration compiled locally.
 - Milestone 8 PR #13 CI attempt 2 passed the Ubuntu AMD64 formatting/Clippy/test gate and both compile-only portable-core checks; PR #13 squash-merged into `develop`.
 - PR #13 review reconciliation: stable Rust 1.98.0 from `~/.cargo` passed formatting, Clippy across all workspace targets/features with warnings denied, workspace tests (27 unit tests, 0 failures), rustdoc with warnings denied, workflow YAML parsing, installer shell syntax, and `git diff --check`.
+- Final corrective PR #14 CI passed the Ubuntu 24.04 formatting/Clippy/test gate and both compile-only portable-core checks, then squash-merged into `develop`. No additional review findings were reported.
+- Terminal documentation reconciliation: stable Rust 1.98.0 from `~/.cargo` passed formatting, warnings-denied Clippy, workspace tests (27 unit tests, 0 failures), and `git diff --check`.
 
 ## Runtime verification actually performed
 
@@ -85,4 +89,4 @@ Updated: 2026-08-25 (Asia/Ho_Chi_Minh)
 
 ## Next planned milestone
 
-- Monitor final corrective PR #14, merge it into `develop` after CI/review pass, synchronize locally, and stop development.
+- Stop autonomous development. Await human direction for any future work.
