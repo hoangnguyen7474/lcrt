@@ -10,7 +10,8 @@ Updated: 2026-08-25 (Asia/Ho_Chi_Minh)
 - Milestone 3 — Local real-time speech-to-text (PR #6).
 - Milestone 4 — Native Ubuntu caption UI (PR #7).
 - Milestone 5 — End-to-end Ubuntu V1 (PR #8).
-- Milestone 6 — Quality and latency pass (local implementation and verification complete; PR pending).
+- Milestone 6 — Quality and latency pass (PR #9).
+- Milestone 7 — Portability preparation (local implementation complete; PR pending).
 
 ## Merged PRs
 
@@ -20,10 +21,11 @@ Updated: 2026-08-25 (Asia/Ho_Chi_Minh)
 - #6 — bounded local whisper.cpp speech-to-text.
 - #7 — native GTK4/libadwaita caption window and bounded UI bridge.
 - #8 — runnable PipeWire → Whisper → GTK live-caption application.
+- #9 — sustained-load STT catch-up, PCM ownership transfer, and stage timing.
 
 ## Current milestone
 
-- Milestone 6 — Quality and latency pass (`perf/latency-reliability`): awaiting PR/CI.
+- Milestone 7 — Portability preparation (`ci/portable-core-checks`): awaiting verification and PR/CI.
 
 ## Tests actually run
 
@@ -37,6 +39,8 @@ Updated: 2026-08-25 (Asia/Ho_Chi_Minh)
 - Milestone 4: GTK/libadwaita workspace check, formatting, Clippy with warnings denied, workspace tests (22 unit tests, 0 failures), rustdoc with warnings denied, and `git diff --check` passed locally. PR #7 CI passed formatting, Clippy, and tests.
 - Milestone 5: workspace check, formatting, Clippy with warnings denied, workspace tests (24 unit tests, 0 failures), rustdoc with warnings denied, and `git diff --check` passed locally. PR #8 CI passed formatting, Clippy, and tests.
 - Milestone 6: workspace check/build, formatting, Clippy with warnings denied, workspace tests (24 unit tests, 0 failures), rustdoc with warnings denied, and `git diff --check` passed locally.
+- Milestone 6 PR #9 CI passed formatting, Clippy, and tests.
+- Milestone 7: workflow YAML parsing, host `lcrt-core` locked check, formatting, Clippy with warnings denied, workspace tests (24 unit tests, 0 failures), rustdoc with warnings denied, and `git diff --check` passed locally. ARM64/Windows target checks await CI.
 
 ## Runtime verification actually performed
 
@@ -53,6 +57,7 @@ Updated: 2026-08-25 (Asia/Ho_Chi_Minh)
 - Milestone 6: an instrumented 20-second system-output run first reproduced a sustained-load failure at 825 chunks when redundant Whisper passes filled the 256-chunk queue. The worker now drains queued audio into the newest rolling window before one inference pass and transfers PCM ownership without a full-buffer clone. The identical fixed run completed with 935 chunks, 10 inference passes, 9 UI updates, and no overflow.
 - Fixed-run stage measurements: capture-to-pipeline 68 us median/141 us p95 (935 samples); Whisper inference 1.940 s median/2.586 s p95 (10 samples); caption-state update 1 us median/2 us p95; UI enqueue 4 us median/8 us p95; GTK queue 8.139 ms median/10.998 ms p95 (9 samples). These are instrumented local measurements, not speech-onset-to-caption latency.
 - A 35.36-second system-output soak played the 11-second JFK sample twice, processed 1,498 chunks/14 caption updates, exited successfully with no queue warning, and peaked at 350,876 KiB RSS. Post-run inspection found no LCRT process or PipeWire node.
+- Milestone 7: no ARM64 or Windows runtime verification was performed; the added checks are compile-only and cover `lcrt-core`, not platform adapters or complete applications.
 
 ## Known blockers
 
@@ -60,4 +65,4 @@ Updated: 2026-08-25 (Asia/Ho_Chi_Minh)
 
 ## Next planned milestone
 
-- Add compile-only portability checks for the shared core on Ubuntu ARM64 and Windows x64 while keeping Linux adapters isolated.
+- Verify the portable-core CI targets, merge Milestone 7, then prepare the final factual overnight report.
