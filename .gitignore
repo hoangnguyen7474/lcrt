@@ -22,3 +22,6 @@ Thumbs.db
 *.tmp
 *.swp
 *~
+
+# Local speech models (large, downloaded separately)
+/models/

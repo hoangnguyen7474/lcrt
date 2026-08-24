@@ -1,0 +1,108 @@
+use std::{path::PathBuf, time::Duration};
+
+use crate::WhisperBackendError;
+
+/// Explicit limits and inference behavior for local streaming STT.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WhisperConfig {
+    /// Path to a whisper.cpp-compatible ggml model; model data is never bundled.
+    pub model_path: PathBuf,
+    /// ISO language code, `auto`, or `None` for automatic detection.
+    pub language: Option<String>,
+    /// CPU threads used by whisper.cpp inference.
+    pub inference_threads: u8,
+    /// Maximum captured audio chunks waiting behind inference.
+    pub input_queue_capacity: usize,
+    /// Rolling audio context retained for each inference pass.
+    pub window_duration: Duration,
+    /// New audio required between partial inference passes.
+    pub partial_step: Duration,
+    /// Minimum buffered speech before the first inference pass.
+    pub minimum_speech: Duration,
+    /// Consecutive low-energy audio that finalizes the current utterance.
+    pub final_silence: Duration,
+    /// RMS threshold in normalized PCM units used by the lightweight energy gate.
+    pub speech_rms_threshold: f32,
+    /// Maximum time allowed for model loading.
+    pub startup_timeout: Duration,
+    /// Maximum time allowed to flush queued audio on stop.
+    pub finish_timeout: Duration,
+}
+
+impl WhisperConfig {
+    /// Creates practical CPU defaults for a configured model path.
+    pub fn new(model_path: impl Into<PathBuf>) -> Self {
+        Self {
+            model_path: model_path.into(),
+            language: None,
+            inference_threads: 4,
+            input_queue_capacity: 256,
+            window_duration: Duration::from_secs(8),
+            partial_step: Duration::from_millis(1_500),
+            minimum_speech: Duration::from_millis(750),
+            final_silence: Duration::from_millis(900),
+            speech_rms_threshold: 0.008,
+            startup_timeout: Duration::from_secs(30),
+            finish_timeout: Duration::from_secs(30),
+        }
+    }
+
+    pub(crate) fn validate(&self) -> Result<(), WhisperBackendError> {
+        if !self.model_path.is_file() {
+            return Err(WhisperBackendError::ModelUnavailable(
+                self.model_path.clone(),
+            ));
+        }
+        if self
+            .language
+            .as_deref()
+            .is_some_and(|language| language.is_empty() || language.contains('\0'))
+        {
+            return Err(WhisperBackendError::InvalidConfiguration(
+                "language must be non-empty and contain no NUL byte".to_owned(),
+            ));
+        }
+        if self.inference_threads == 0 {
+            return Err(WhisperBackendError::InvalidConfiguration(
+                "inference thread count must be greater than zero".to_owned(),
+            ));
+        }
+        if self.input_queue_capacity == 0 {
+            return Err(WhisperBackendError::InvalidConfiguration(
+                "input queue capacity must be greater than zero".to_owned(),
+            ));
+        }
+        if self.partial_step.is_zero()
+            || self.minimum_speech.is_zero()
+            || self.window_duration.is_zero()
+            || self.final_silence.is_zero()
+        {
+            return Err(WhisperBackendError::InvalidConfiguration(
+                "window, step, minimum speech, and final silence must be greater than zero"
+                    .to_owned(),
+            ));
+        }
+        if self.partial_step > self.window_duration
+            || self.minimum_speech > self.window_duration
+            || self.final_silence > self.window_duration
+        {
+            return Err(WhisperBackendError::InvalidConfiguration(
+                "step, minimum speech, and final silence must not exceed the rolling window"
+                    .to_owned(),
+            ));
+        }
+        if !self.speech_rms_threshold.is_finite()
+            || !(0.0..=1.0).contains(&self.speech_rms_threshold)
+        {
+            return Err(WhisperBackendError::InvalidConfiguration(
+                "speech RMS threshold must be finite and between zero and one".to_owned(),
+            ));
+        }
+        if self.startup_timeout.is_zero() || self.finish_timeout.is_zero() {
+            return Err(WhisperBackendError::InvalidConfiguration(
+                "startup and finish timeouts must be greater than zero".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+}
