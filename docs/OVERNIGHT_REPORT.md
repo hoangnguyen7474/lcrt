@@ -24,6 +24,7 @@ otherwise. No change was merged into `main`.
 - Final factual report delivery: PR #11.
 - Terminal state reconciliation: PR #12.
 - Milestone 8, native overlay presentation: PR #13.
+- PR #13 review reconciliation: PR #14.
 
 ## Exact features implemented
 
@@ -130,7 +131,9 @@ otherwise. No change was merged into `main`.
 - The two valid automated review findings were corrected locally after the
   automatic merge: pinned mode now requires protocol v4 for usable on-demand
   keyboard focus, and explicit size controls preserve layer-surface resizing.
-  Final corrective PR #14 CI is pending.
+  Final corrective PR #14 passed the Ubuntu 24.04 gate and both portable-core
+  compile checks, reported no additional review findings, and squash-merged
+  into `develop`.
 
 ## Measured latency and performance
 
