@@ -8,6 +8,7 @@ use std::{
 use gtk::{gdk, glib, pango, prelude::*};
 use lcrt_core::{AudioSourceDescriptor, AudioSourceKind};
 use libadwaita as adw;
+use tracing::debug;
 
 use crate::{CaptionUiAction, UiEvent};
 
@@ -202,6 +203,11 @@ fn build_window(
             };
             match event {
                 UiEvent::Caption(snapshot) => {
+                    debug!(
+                        revision = snapshot.revision(),
+                        ui_queue_us = snapshot.age().as_micros(),
+                        "caption update reached GTK"
+                    );
                     caption.set_text(snapshot.caption().text());
                     caption_status.set_text(match snapshot.caption().status() {
                         lcrt_core::CaptionStatus::Partial => "Listening…",

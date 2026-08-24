@@ -89,7 +89,7 @@ pub trait Transcriber: Send {
     /// Consumes one bounded audio chunk and returns zero or more caption updates.
     fn push_audio(
         &mut self,
-        chunk: &AudioChunk,
+        chunk: AudioChunk,
     ) -> Result<Vec<TranscriptUpdate>, TranscriptionError>;
     /// Flushes any buffered speech when capture stops.
     fn finish(&mut self) -> Result<Vec<TranscriptUpdate>, TranscriptionError>;

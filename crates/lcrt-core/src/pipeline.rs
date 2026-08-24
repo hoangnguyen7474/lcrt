@@ -103,10 +103,15 @@ where
                             maximum_samples: self.config.max_audio_chunk_samples,
                         });
                     }
+                    debug!(
+                        capture_to_pipeline_us = chunk.capture_age().as_micros(),
+                        frames = chunk.frame_count(),
+                        "audio chunk reached pipeline"
+                    );
                     summary.audio_chunks += 1;
                     let updates = self
                         .transcriber
-                        .push_audio(&chunk)
+                        .push_audio(chunk)
                         .map_err(PipelineError::Transcription)?;
                     self.publish_updates(updates, &mut summary)?;
                 }
@@ -124,13 +129,23 @@ where
         summary: &mut RunSummary,
     ) -> Result<(), PipelineError> {
         for update in updates {
+            let state_started = std::time::Instant::now();
             let snapshot = self
                 .captions
                 .apply(update)
                 .map_err(PipelineError::CaptionState)?;
+            let revision = snapshot.revision();
+            let caption_state_us = state_started.elapsed().as_micros();
+            let publish_started = std::time::Instant::now();
             self.sink
                 .publish(snapshot)
                 .map_err(PipelineError::CaptionSink)?;
+            debug!(
+                revision,
+                caption_state_us,
+                ui_enqueue_us = publish_started.elapsed().as_micros(),
+                "caption update published"
+            );
             summary.caption_updates += 1;
         }
         Ok(())
@@ -241,7 +256,7 @@ mod tests {
     impl Transcriber for FakeTranscriber {
         fn push_audio(
             &mut self,
-            _chunk: &AudioChunk,
+            _chunk: AudioChunk,
         ) -> Result<Vec<TranscriptUpdate>, TranscriptionError> {
             Ok(vec![TranscriptUpdate::partial("hello").unwrap()])
         }

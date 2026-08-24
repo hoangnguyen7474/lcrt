@@ -207,8 +207,8 @@ fn run_controller(
                     continue;
                 };
                 let _ = sink.clear_error();
-                let _ = sink.set_status("Loading model…");
                 let _ = sink.set_running(true);
+                let _ = sink.set_status("Loading model…");
                 match start_pipeline(source, model_path, config.language.clone(), sink.clone()) {
                     Ok(started) => session = Some(started),
                     Err(message) => {
@@ -275,6 +275,7 @@ fn run_pipeline(
     whisper_config.language = language;
     let transcriber = WhisperTranscriber::new(whisper_config)?;
     let audio = PipeWireCapture::start(source, PipeWireCaptureConfig::default())?;
+    sink.set_status("Listening…")?;
     let pipeline = CaptionPipeline::new(audio, transcriber, sink, RuntimeConfig::default())?;
     Ok(pipeline.run(cancelled)?)
 }
