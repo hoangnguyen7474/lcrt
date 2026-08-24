@@ -12,6 +12,7 @@ Updated: 2026-08-25 (Asia/Ho_Chi_Minh)
 - Milestone 5 — End-to-end Ubuntu V1 (PR #8).
 - Milestone 6 — Quality and latency pass (PR #9).
 - Milestone 7 — Portability preparation (PR #10).
+- Milestone 8 — Native overlay presentation (PR #13; CI pending).
 - Final overnight report (PR #11).
 - Terminal state reconciliation (PR #12).
 
@@ -30,7 +31,7 @@ Updated: 2026-08-25 (Asia/Ho_Chi_Minh)
 
 ## Current milestone
 
-- Overnight run complete; no active milestone.
+- Milestone 8 — Native overlay presentation (PR #13): local verification complete; CI/review pending.
 
 ## Tests actually run
 
@@ -50,6 +51,9 @@ Updated: 2026-08-25 (Asia/Ho_Chi_Minh)
 - Final report: formatting, Clippy with warnings denied, workspace tests (24 unit tests, 0 failures), rustdoc with warnings denied, and `git diff --check` passed locally.
 - Final report PR #11 CI passed the full Ubuntu AMD64 gate plus both compile-only portable-core target checks.
 - Terminal state PR #12 passed the full Ubuntu AMD64 gate plus both compile-only portable-core target checks.
+- Proper rustup-toolchain recheck: stable Rust 1.98.0 from `~/.cargo` passed formatting, Clippy with warnings denied, and workspace tests (24 unit tests, 0 failures). The first Clippy attempt was blocked by a read-only system `ccache`; rerunning with `CCACHE_DISABLE=1` passed without using the retired `/tmp` Rust fallback.
+- Milestone 8: stable Rust 1.98.0 from `~/.cargo` passed formatting, Clippy across all workspace targets/features with warnings denied, workspace tests (26 unit tests, 0 failures), rustdoc with warnings denied, and `git diff --check`.
+- Milestone 8 PR #13 CI attempt 1: both portable-core checks passed; the Ubuntu gate failed before Rust setup because Ubuntu 24.04 does not package `libgtk4-layer-shell-dev`. The workflow now builds checksum-pinned gtk4-layer-shell 1.0.4 from source; its exact Meson configuration compiled locally. CI retry is pending.
 
 ## Runtime verification actually performed
 
@@ -67,11 +71,14 @@ Updated: 2026-08-25 (Asia/Ho_Chi_Minh)
 - Fixed-run stage measurements: capture-to-pipeline 68 us median/141 us p95 (935 samples); Whisper inference 1.940 s median/2.586 s p95 (10 samples); caption-state update 1 us median/2 us p95; UI enqueue 4 us median/8 us p95; GTK queue 8.139 ms median/10.998 ms p95 (9 samples). These are instrumented local measurements, not speech-onset-to-caption latency.
 - A 35.36-second system-output soak played the 11-second JFK sample twice, processed 1,498 chunks/14 caption updates, exited successfully with no queue warning, and peaked at 350,876 KiB RSS. Post-run inspection found no LCRT process or PipeWire node.
 - Milestone 7: no ARM64 or Windows runtime verification was performed; the added checks are compile-only and cover `lcrt-core`, not platform adapters or complete applications.
+- Milestone 8: the GTK UI launched and exited cleanly on the active GNOME Wayland desktop. LCRT detected that layer shell is unavailable and used the standard-window fallback. A 15-second integrated system-output run replayed the local JFK fixture, processed 435 chunks, published 6 caption updates, and stopped cleanly. CSS loaded without parser errors, but transparency was not screenshot-verified because desktop screenshot access was denied and no isolated in-app browser was available. The pinned-overlay path was compile-tested only, not runtime-tested on a supporting compositor.
 
 ## Known blockers
 
 - GitHub CLI authentication is invalid (not blocking: the authenticated GitHub connector handles PR/review/CI operations, and Git over SSH works).
+- GNOME Wayland does not advertise the layer-shell protocol, so applications cannot enforce always-on-top there; LCRT will use a transparent normal-window fallback and report the capability accurately.
+- Visual appearance and a real pinned overlay remain unverified because this host lacks both a layer-shell compositor and available isolated-browser/screenshot access.
 
 ## Next planned milestone
 
-- Human-directed next milestone: complete the Ubuntu V1 always-on-top/transparent overlay slice and verify audible microphone latency.
+- Monitor Milestone 8 PR #13 CI and review, merge it into `develop`, then reconcile the final report and terminal progress state through the normal PR workflow.

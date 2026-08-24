@@ -73,11 +73,19 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --yes \
+            curl \
             libadwaita-1-dev \
             libgtk-4-dev \
             libpipewire-0.3-dev \
             libspa-0.2-dev \
+            libwayland-dev \
+            meson \
+            ninja-build \
+            wayland-protocols \
             pkg-config
+
+      - name: Install pinned GTK4 layer-shell library
+        run: scripts/install-gtk4-layer-shell.sh
 
       - name: Install Rust toolchain
         if: ${{ hashFiles('Cargo.toml') != '' }}
