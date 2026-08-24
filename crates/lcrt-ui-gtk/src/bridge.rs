@@ -3,10 +3,13 @@ use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
 use lcrt_core::{CaptionSink, CaptionSinkError, CaptionSnapshot};
 
 /// User intent emitted by the native window.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CaptionUiAction {
     /// Start caption processing.
-    Start,
+    Start {
+        /// Stable platform adapter identifier selected in the window.
+        source_id: String,
+    },
     /// Stop caption processing and release capture resources.
     Stop,
 }
@@ -18,6 +21,8 @@ pub enum UiEvent {
     Caption(CaptionSnapshot),
     /// Whether caption processing is active.
     Running(bool),
+    /// Short lifecycle status shown beside the controls.
+    Status(String),
     /// User-visible pipeline or configuration failure.
     Error(String),
     /// Remove the currently displayed error.
@@ -48,6 +53,17 @@ impl GtkCaptionSink {
     /// Updates whether captioning is running.
     pub fn set_running(&self, running: bool) -> Result<(), CaptionSinkError> {
         self.send(UiEvent::Running(running))
+    }
+
+    /// Shows a short pipeline lifecycle status.
+    pub fn set_status(&self, status: impl Into<String>) -> Result<(), CaptionSinkError> {
+        let status = status.into();
+        if status.trim().is_empty() {
+            return Err(CaptionSinkError::new(
+                "GTK caption status must not be empty",
+            ));
+        }
+        self.send(UiEvent::Status(status))
     }
 
     /// Shows an actionable error in the caption window.
@@ -124,5 +140,6 @@ mod tests {
         assert!(GtkCaptionSink::channel(0).is_err());
         let (sink, _receiver) = GtkCaptionSink::channel(1).unwrap();
         assert!(sink.show_error("  ").is_err());
+        assert!(sink.set_status("").is_err());
     }
 }

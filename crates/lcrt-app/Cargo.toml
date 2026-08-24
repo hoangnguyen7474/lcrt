@@ -1,0 +1,24 @@
+[package]
+name = "lcrt-app"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[[bin]]
+name = "lcrt"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+gtk = { package = "gtk4", version = "0.10.3" }
+lcrt-audio-pipewire = { path = "../lcrt-audio-pipewire" }
+lcrt-core = { path = "../lcrt-core" }
+lcrt-stt-whisper = { path = "../lcrt-stt-whisper" }
+lcrt-ui-gtk = { path = "../lcrt-ui-gtk" }
+tracing = { version = "0.1.41", default-features = false, features = ["std"] }
+tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }

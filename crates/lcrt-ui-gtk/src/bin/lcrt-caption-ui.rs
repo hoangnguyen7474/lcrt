@@ -1,6 +1,8 @@
 use std::{env, process::ExitCode, sync::mpsc::sync_channel, thread, time::Duration};
 
-use lcrt_core::{CaptionSink, CaptionState, TranscriptUpdate};
+use lcrt_core::{
+    AudioSourceDescriptor, AudioSourceKind, CaptionSink, CaptionState, TranscriptUpdate,
+};
 use lcrt_ui_gtk::{CaptionUiAction, CaptionUiOptions, GtkCaptionSink, run_caption_ui};
 
 fn main() -> ExitCode {
@@ -21,7 +23,15 @@ fn main() -> ExitCode {
         spawn_demo_controller(sink, action_receiver)
     };
 
-    let status = run_caption_ui(events, actions, CaptionUiOptions::default());
+    let options = CaptionUiOptions {
+        sources: vec![AudioSourceDescriptor::new(
+            "demo",
+            "Deterministic demo",
+            AudioSourceKind::Microphone,
+        )],
+        ..CaptionUiOptions::default()
+    };
+    let status = run_caption_ui(events, actions, options);
     let controller_ok = controller.join().is_ok();
     if status == gtk::glib::ExitCode::SUCCESS && controller_ok {
         ExitCode::SUCCESS
@@ -46,7 +56,7 @@ fn spawn_demo_controller(
     thread::spawn(move || {
         while let Ok(action) = actions.recv() {
             match action {
-                CaptionUiAction::Start => {
+                CaptionUiAction::Start { .. } => {
                     publish_demo(&sink, Duration::from_millis(450), Some(&actions));
                 }
                 CaptionUiAction::Stop => {
@@ -88,12 +98,13 @@ fn publish_demo(
         if caption_sink.publish(snapshot).is_err() {
             break;
         }
-        let stopped = actions.is_some_and(|actions| match actions.recv_timeout(interval) {
-            Ok(CaptionUiAction::Stop) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                true
-            }
-            Ok(CaptionUiAction::Start) | Err(std::sync::mpsc::RecvTimeoutError::Timeout) => false,
-        });
+        let stopped =
+            actions.is_some_and(|actions| match actions.recv_timeout(interval) {
+                Ok(CaptionUiAction::Stop)
+                | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => true,
+                Ok(CaptionUiAction::Start { .. })
+                | Err(std::sync::mpsc::RecvTimeoutError::Timeout) => false,
+            });
         if stopped {
             break;
         }

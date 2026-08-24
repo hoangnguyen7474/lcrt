@@ -53,16 +53,21 @@ where
 
     /// Runs until cancellation, clean end-of-stream, or an adapter error.
     ///
-    /// The audio adapter is stopped even when transcription or UI publication
-    /// fails. If shutdown also fails, the original processing error is kept.
+    /// The audio adapter is stopped before transcription is flushed, and is
+    /// still stopped when capture, transcription, or UI publication fails. If
+    /// shutdown also fails, the original processing error is kept.
     pub fn run(mut self, cancelled: &AtomicBool) -> Result<RunSummary, PipelineError> {
         let source_id = self.audio.source().id().to_owned();
         info!(source_id, "caption pipeline started");
-        let result = self.run_inner(cancelled);
+        let capture_result = self.capture_until_stopped(cancelled);
         let stop_result = self.audio.stop().map_err(PipelineError::Audio);
-
-        match (result, stop_result) {
-            (Ok(summary), Ok(())) => {
+        match (capture_result, stop_result) {
+            (Ok(mut summary), Ok(())) => {
+                let final_updates = self
+                    .transcriber
+                    .finish()
+                    .map_err(PipelineError::Transcription)?;
+                self.publish_updates(final_updates, &mut summary)?;
                 info!(
                     source_id,
                     audio_chunks = summary.audio_chunks,
@@ -80,7 +85,10 @@ where
         }
     }
 
-    fn run_inner(&mut self, cancelled: &AtomicBool) -> Result<RunSummary, PipelineError> {
+    fn capture_until_stopped(
+        &mut self,
+        cancelled: &AtomicBool,
+    ) -> Result<RunSummary, PipelineError> {
         let mut summary = RunSummary::default();
         while !cancelled.load(Ordering::Acquire) {
             match self
@@ -107,11 +115,6 @@ where
             }
         }
 
-        let final_updates = self
-            .transcriber
-            .finish()
-            .map_err(PipelineError::Transcription)?;
-        self.publish_updates(final_updates, &mut summary)?;
         Ok(summary)
     }
 
@@ -231,7 +234,9 @@ mod tests {
         }
     }
 
-    struct FakeTranscriber;
+    struct FakeTranscriber {
+        audio_stopped: Arc<AtomicBool>,
+    }
 
     impl Transcriber for FakeTranscriber {
         fn push_audio(
@@ -242,6 +247,11 @@ mod tests {
         }
 
         fn finish(&mut self) -> Result<Vec<TranscriptUpdate>, TranscriptionError> {
+            if !self.audio_stopped.load(Ordering::Acquire) {
+                return Err(TranscriptionError::new(
+                    "audio was not stopped before transcription flush",
+                ));
+            }
             Ok(vec![TranscriptUpdate::finalized("hello world").unwrap()])
         }
     }
@@ -282,7 +292,9 @@ mod tests {
         );
         let pipeline = CaptionPipeline::new(
             audio,
-            FakeTranscriber,
+            FakeTranscriber {
+                audio_stopped: Arc::clone(&stopped),
+            },
             CollectingSink::default(),
             RuntimeConfig::default(),
         )
@@ -311,9 +323,15 @@ mod tests {
             max_audio_chunk_samples: 4,
             ..RuntimeConfig::default()
         };
-        let pipeline =
-            CaptionPipeline::new(audio, FakeTranscriber, CollectingSink::default(), config)
-                .unwrap();
+        let pipeline = CaptionPipeline::new(
+            audio,
+            FakeTranscriber {
+                audio_stopped: Arc::clone(&stopped),
+            },
+            CollectingSink::default(),
+            config,
+        )
+        .unwrap();
         let error = pipeline.run(&AtomicBool::new(false)).unwrap_err();
         assert!(matches!(
             error,
