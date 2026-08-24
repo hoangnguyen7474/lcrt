@@ -53,6 +53,7 @@ Updated: 2026-08-25 (Asia/Ho_Chi_Minh)
 - Terminal state PR #12 passed the full Ubuntu AMD64 gate plus both compile-only portable-core target checks.
 - Proper rustup-toolchain recheck: stable Rust 1.98.0 from `~/.cargo` passed formatting, Clippy with warnings denied, and workspace tests (24 unit tests, 0 failures). The first Clippy attempt was blocked by a read-only system `ccache`; rerunning with `CCACHE_DISABLE=1` passed without using the retired `/tmp` Rust fallback.
 - Milestone 8: stable Rust 1.98.0 from `~/.cargo` passed formatting, Clippy across all workspace targets/features with warnings denied, workspace tests (26 unit tests, 0 failures), rustdoc with warnings denied, and `git diff --check`.
+- Milestone 8 PR #13 CI attempt 1: both portable-core checks passed; the Ubuntu gate failed before Rust setup because Ubuntu 24.04 does not package `libgtk4-layer-shell-dev`. The workflow now builds checksum-pinned gtk4-layer-shell 1.0.4 from source; its exact Meson configuration compiled locally. CI retry is pending.
 
 ## Runtime verification actually performed
 

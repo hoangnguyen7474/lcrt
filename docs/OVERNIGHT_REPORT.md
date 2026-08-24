@@ -117,6 +117,10 @@ otherwise. No change was merged into `main`.
 - CI did not exercise PipeWire hardware, Whisper model inference, GTK display,
   or any platform runtime.
 - Milestone 8 CI is pending; no CI result is claimed for its overlay changes.
+- PR #13 CI attempt 1 passed both compile-only portable-core jobs but failed the
+  Ubuntu gate before Rust setup because Ubuntu 24.04 lacks a GTK4 layer-shell
+  development package. A checksum-pinned 1.0.4 source build was added and
+  compiled locally; its CI result is pending.
 
 ## Measured latency and performance
 
