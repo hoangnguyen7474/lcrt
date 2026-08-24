@@ -25,6 +25,9 @@ platform audio adapter -> AudioCapture -> CaptionPipeline -> Transcriber
   audio-stop attempts.
 
 The core contains no PipeWire, GTK, Wayland, WASAPI, or speech-engine APIs.
+CI compile-checks this crate for Ubuntu ARM64 and Windows x64 targets. These
+checks prove portable Rust type-checking only: they do not link a distributable
+application, exercise platform adapters, or validate runtime behavior.
 
 ## Platform adapters
 
