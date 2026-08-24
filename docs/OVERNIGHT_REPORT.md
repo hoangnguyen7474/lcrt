@@ -23,7 +23,7 @@ otherwise. No change was merged into `main`.
 - Milestone 7, compile-only portable-core checks: PR #10.
 - Final factual report delivery: PR #11.
 - Terminal state reconciliation: PR #12.
-- Milestone 8, native overlay presentation: implemented locally; PR/CI pending.
+- Milestone 8, native overlay presentation: PR #13 open; CI pending.
 
 ## Exact features implemented
 

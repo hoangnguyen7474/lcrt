@@ -12,7 +12,7 @@ Updated: 2026-08-25 (Asia/Ho_Chi_Minh)
 - Milestone 5 — End-to-end Ubuntu V1 (PR #8).
 - Milestone 6 — Quality and latency pass (PR #9).
 - Milestone 7 — Portability preparation (PR #10).
-- Milestone 8 — Native overlay presentation (local implementation complete; PR pending).
+- Milestone 8 — Native overlay presentation (PR #13; CI pending).
 - Final overnight report (PR #11).
 - Terminal state reconciliation (PR #12).
 
@@ -31,7 +31,7 @@ Updated: 2026-08-25 (Asia/Ho_Chi_Minh)
 
 ## Current milestone
 
-- Milestone 8 — Native overlay presentation (`feat/native-overlay-presentation`): local verification complete; PR/CI pending.
+- Milestone 8 — Native overlay presentation (PR #13): local verification complete; CI/review pending.
 
 ## Tests actually run
 
@@ -80,4 +80,4 @@ Updated: 2026-08-25 (Asia/Ho_Chi_Minh)
 
 ## Next planned milestone
 
-- Open the Milestone 8 PR against `develop`, monitor CI and review, merge it, then reconcile the final report and terminal progress state through the normal PR workflow.
+- Monitor Milestone 8 PR #13 CI and review, merge it into `develop`, then reconcile the final report and terminal progress state through the normal PR workflow.
