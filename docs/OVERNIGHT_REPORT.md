@@ -19,6 +19,7 @@ No change was merged into `main`.
 - Milestone 5, end-to-end Ubuntu V1 application: PR #8.
 - Milestone 6, quality and latency pass: PR #9.
 - Milestone 7, compile-only portable-core checks: PR #10.
+- Final factual report delivery: PR #11.
 
 ## Exact features implemented
 
