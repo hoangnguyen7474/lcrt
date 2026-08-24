@@ -130,7 +130,7 @@ otherwise. No change was merged into `main`.
 - The two valid automated review findings were corrected locally after the
   automatic merge: pinned mode now requires protocol v4 for usable on-demand
   keyboard focus, and explicit size controls preserve layer-surface resizing.
-  Their final corrective PR CI result is pending.
+  Final corrective PR #14 CI is pending.
 
 ## Measured latency and performance
 

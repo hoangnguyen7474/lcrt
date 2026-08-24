@@ -32,7 +32,7 @@ Updated: 2026-08-25 (Asia/Ho_Chi_Minh)
 
 ## Current milestone
 
-- PR #13 review reconciliation (`fix/overlay-review-findings`): local verification complete; final corrective PR pending.
+- PR #13 review reconciliation (PR #14): local verification complete; CI/review pending.
 
 ## Tests actually run
 
@@ -85,4 +85,4 @@ Updated: 2026-08-25 (Asia/Ho_Chi_Minh)
 
 ## Next planned milestone
 
-- Open the final narrowly scoped PR for PR #13 review fixes and terminal documentation, pass CI, merge it into `develop`, synchronize locally, and stop development.
+- Monitor final corrective PR #14, merge it into `develop` after CI/review pass, synchronize locally, and stop development.
