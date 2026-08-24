@@ -9,3 +9,6 @@ publish = false
 
 [lints]
 workspace = true
+
+[dependencies]
+tracing = { version = "0.1.41", default-features = false, features = ["std"] }
