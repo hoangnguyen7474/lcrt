@@ -213,7 +213,7 @@ impl WhisperTranscriber {
 impl Transcriber for WhisperTranscriber {
     fn push_audio(
         &mut self,
-        chunk: &AudioChunk,
+        chunk: AudioChunk,
     ) -> Result<Vec<TranscriptUpdate>, TranscriptionError> {
         if self.finished {
             return Err(TranscriptionError::new(
@@ -225,7 +225,7 @@ impl Transcriber for WhisperTranscriber {
                 "Whisper worker command channel is unavailable",
             ));
         };
-        match commands.try_send(WorkerCommand::Audio(chunk.clone())) {
+        match commands.try_send(WorkerCommand::Audio(chunk)) {
             Ok(()) => self
                 .collect_available()
                 .map_err(|error| TranscriptionError::new(error.to_string())),
@@ -293,33 +293,40 @@ fn run_worker(
         }
         match command {
             WorkerCommand::Audio(chunk) => {
-                let converter = match converter.as_mut() {
-                    Some(converter) => converter,
-                    None => converter.insert(AudioConverter::new(&chunk)?),
-                };
-                let mono = converter.push(&chunk)?;
-                process_mono(
-                    &mono,
-                    &mut window,
-                    &mut state,
-                    &config,
-                    &events,
-                    &mut last_partial,
-                )?;
-            }
-            WorkerCommand::Finish => {
-                if let Some(converter) = converter.as_mut() {
-                    let tail = converter.finish()?;
-                    process_mono(
-                        &tail,
+                let mut pending_kind = append_chunk(chunk, &mut converter, &mut window)?;
+                let mut finish_requested = false;
+
+                // Inference can be slower than one partial interval. Drain audio
+                // captured during the previous pass and infer once over the
+                // newest rolling window instead of repeatedly transcribing stale
+                // intermediate windows while the bounded queue grows.
+                while pending_kind != Some(InferenceKind::Final) {
+                    match commands.try_recv() {
+                        Ok(WorkerCommand::Audio(chunk)) => {
+                            if let Some(kind) = append_chunk(chunk, &mut converter, &mut window)? {
+                                pending_kind = Some(kind);
+                            }
+                        }
+                        Ok(WorkerCommand::Finish) => {
+                            finish_requested = true;
+                            break;
+                        }
+                        Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
+                    }
+                }
+
+                if finish_requested {
+                    finish_stream(
+                        &mut converter,
                         &mut window,
                         &mut state,
                         &config,
                         &events,
                         &mut last_partial,
                     )?;
+                    return Ok(());
                 }
-                if let Some(kind) = window.finish_kind() {
+                if let Some(kind) = pending_kind {
                     infer_and_publish(
                         kind,
                         &mut window,
@@ -329,6 +336,16 @@ fn run_worker(
                         &mut last_partial,
                     )?;
                 }
+            }
+            WorkerCommand::Finish => {
+                finish_stream(
+                    &mut converter,
+                    &mut window,
+                    &mut state,
+                    &config,
+                    &events,
+                    &mut last_partial,
+                )?;
                 return Ok(());
             }
         }
@@ -336,15 +353,32 @@ fn run_worker(
     Ok(())
 }
 
-fn process_mono(
-    mono: &[f32],
+fn append_chunk(
+    chunk: AudioChunk,
+    converter: &mut Option<AudioConverter>,
+    window: &mut StreamingWindow,
+) -> Result<Option<InferenceKind>, WhisperBackendError> {
+    let converter = match converter.as_mut() {
+        Some(converter) => converter,
+        None => converter.insert(AudioConverter::new(&chunk)?),
+    };
+    let mono = converter.push(&chunk)?;
+    Ok(window.push(&mono))
+}
+
+fn finish_stream(
+    converter: &mut Option<AudioConverter>,
     window: &mut StreamingWindow,
     state: &mut WhisperState,
     config: &WhisperConfig,
     events: &SyncSender<WorkerEvent>,
     last_partial: &mut String,
 ) -> Result<(), WhisperBackendError> {
-    if let Some(kind) = window.push(mono) {
+    if let Some(converter) = converter.as_mut() {
+        let tail = converter.finish()?;
+        window.push(&tail);
+    }
+    if let Some(kind) = window.finish_kind() {
         infer_and_publish(kind, window, state, config, events, last_partial)?;
     }
     Ok(())
@@ -359,11 +393,13 @@ fn infer_and_publish(
     last_partial: &mut String,
 ) -> Result<(), WhisperBackendError> {
     let started = Instant::now();
+    let audio_duration_ms = window.samples().len() * 1_000 / 16_000;
     let text = transcribe_window(state, window.samples(), config)?;
     debug!(
         ?kind,
         audio_samples = window.samples().len(),
-        inference_ms = started.elapsed().as_millis(),
+        audio_duration_ms,
+        inference_us = started.elapsed().as_micros(),
         "Whisper inference completed"
     );
     window.mark_inferred(kind);

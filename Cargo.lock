@@ -649,6 +649,7 @@ dependencies = [
  "gtk4",
  "lcrt-core",
  "libadwaita",
+ "tracing",
 ]
 
 [[package]]

@@ -1,6 +1,10 @@
 //! Caption domain state.
 
-use std::{error::Error, fmt};
+use std::{
+    error::Error,
+    fmt,
+    time::{Duration, Instant},
+};
 
 use crate::transcription::TranscriptUpdate;
 
@@ -46,11 +50,20 @@ impl Caption {
 }
 
 /// Immutable caption state sent to a UI adapter.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct CaptionSnapshot {
     revision: u64,
     caption: Caption,
+    created_at: Instant,
 }
+
+impl PartialEq for CaptionSnapshot {
+    fn eq(&self, other: &Self) -> bool {
+        self.revision == other.revision && self.caption == other.caption
+    }
+}
+
+impl Eq for CaptionSnapshot {}
 
 impl CaptionSnapshot {
     /// Returns a monotonically increasing state revision.
@@ -61,6 +74,11 @@ impl CaptionSnapshot {
     /// Returns the current caption.
     pub fn caption(&self) -> &Caption {
         &self.caption
+    }
+
+    /// Returns elapsed time since the pipeline created this snapshot.
+    pub fn age(&self) -> Duration {
+        self.created_at.elapsed()
     }
 }
 
@@ -95,6 +113,7 @@ impl CaptionState {
         Ok(CaptionSnapshot {
             revision: self.revision,
             caption,
+            created_at: Instant::now(),
         })
     }
 
@@ -103,6 +122,7 @@ impl CaptionState {
         self.current.clone().map(|caption| CaptionSnapshot {
             revision: self.revision,
             caption,
+            created_at: Instant::now(),
         })
     }
 }

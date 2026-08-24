@@ -39,7 +39,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     let samples_per_chunk = CHUNK_FRAMES * usize::from(channels);
     for samples in samples.chunks(samples_per_chunk) {
         let chunk = AudioChunk::new(samples.to_vec(), sample_rate, channels)?;
-        print_updates(transcriber.push_audio(&chunk)?);
+        print_updates(transcriber.push_audio(chunk)?);
     }
     print_updates(transcriber.finish()?);
     Ok(())

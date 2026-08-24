@@ -1,6 +1,10 @@
 //! Platform-independent audio input types and adapter boundary.
 
-use std::{error::Error, fmt, time::Duration};
+use std::{
+    error::Error,
+    fmt,
+    time::{Duration, Instant},
+};
 
 /// The user-facing type of an audio source.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -46,11 +50,20 @@ impl AudioSourceDescriptor {
 }
 
 /// A bounded chunk of interleaved normalized PCM samples.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct AudioChunk {
     samples: Vec<f32>,
     sample_rate_hz: u32,
     channels: u16,
+    captured_at: Instant,
+}
+
+impl PartialEq for AudioChunk {
+    fn eq(&self, other: &Self) -> bool {
+        self.samples == other.samples
+            && self.sample_rate_hz == other.sample_rate_hz
+            && self.channels == other.channels
+    }
 }
 
 impl AudioChunk {
@@ -82,6 +95,7 @@ impl AudioChunk {
             samples,
             sample_rate_hz,
             channels,
+            captured_at: Instant::now(),
         })
     }
 
@@ -103,6 +117,11 @@ impl AudioChunk {
     /// Returns the number of sample frames in this chunk.
     pub fn frame_count(&self) -> usize {
         self.samples.len() / usize::from(self.channels)
+    }
+
+    /// Returns elapsed time since the adapter constructed this chunk.
+    pub fn capture_age(&self) -> Duration {
+        self.captured_at.elapsed()
     }
 }
 
