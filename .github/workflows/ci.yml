@@ -42,7 +42,12 @@ jobs:
         if: ${{ hashFiles('Cargo.toml') != '' }}
         run: |
           sudo apt-get update
-          sudo apt-get install --yes libpipewire-0.3-dev libspa-0.2-dev pkg-config
+          sudo apt-get install --yes \
+            libadwaita-1-dev \
+            libgtk-4-dev \
+            libpipewire-0.3-dev \
+            libspa-0.2-dev \
+            pkg-config
 
       - name: Install Rust toolchain
         if: ${{ hashFiles('Cargo.toml') != '' }}

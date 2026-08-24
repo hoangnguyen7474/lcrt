@@ -40,6 +40,21 @@ The capture duration is clamped to 1–30 seconds. The utility reports negotiate
 format and aggregate sample statistics; it neither records audio to disk nor
 silently substitutes synthetic audio when PipeWire fails.
 
+### Native caption UI development
+
+The Ubuntu window uses GTK4 and libadwaita. Install `libgtk-4-dev` and
+`libadwaita-1-dev`, then launch its incremental-caption demonstration with:
+
+```sh
+cargo run -p lcrt-ui-gtk --bin lcrt-caption-ui
+```
+
+The window has bounded Start/Stop actions, partial/final status, inline errors,
+resizing, selectable caption text, and a 16–64 point font control. Its
+`--smoke-test` mode injects deterministic partial/final updates and closes
+itself; it does not exercise audio capture. The end-to-end milestone wires this
+presentation layer to the real audio and transcription adapters.
+
 ### Local Whisper development
 
 The speech-to-text adapter uses whisper.cpp through `whisper-rs`, runs model

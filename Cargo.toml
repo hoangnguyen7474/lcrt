@@ -3,6 +3,7 @@ members = [
     "crates/lcrt-audio-pipewire",
     "crates/lcrt-core",
     "crates/lcrt-stt-whisper",
+    "crates/lcrt-ui-gtk",
 ]
 resolver = "3"
 
