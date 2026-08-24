@@ -17,6 +17,11 @@ const APPLICATION_ID: &str = "io.github.hoangnguyen7474.Lcrt";
 const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(16);
 const MINIMUM_BACKGROUND_OPACITY: f64 = 0.3;
 const OVERLAY_BOTTOM_MARGIN: i32 = 36;
+const MINIMUM_OVERLAY_WIDTH: f64 = 320.0;
+const MINIMUM_OVERLAY_HEIGHT: f64 = 160.0;
+const MAXIMUM_OVERLAY_WIDTH: f64 = 2_560.0;
+const MAXIMUM_OVERLAY_HEIGHT: f64 = 1_440.0;
+const ON_DEMAND_KEYBOARD_PROTOCOL_VERSION: u32 = 4;
 
 /// Initial native-window presentation settings.
 #[derive(Clone, Debug, PartialEq)]
@@ -186,15 +191,34 @@ fn build_window(
         });
     }
 
-    let controls = gtk::Box::new(gtk::Orientation::Horizontal, 12);
-    controls.set_margin_top(12);
-    controls.append(&source_picker);
-    controls.append(&start_stop);
-    controls.append(&caption_status);
-    controls.append(&gtk::Label::new(Some("Font")));
-    controls.append(&font_size);
-    controls.append(&gtk::Label::new(Some("Opacity")));
-    controls.append(&opacity);
+    let session_controls = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+    session_controls.set_margin_top(12);
+    session_controls.append(&source_picker);
+    session_controls.append(&start_stop);
+    session_controls.append(&caption_status);
+
+    let width = dimension_control(
+        options.width,
+        MINIMUM_OVERLAY_WIDTH,
+        MAXIMUM_OVERLAY_WIDTH,
+        "Caption window width",
+    );
+    let height = dimension_control(
+        options.height,
+        MINIMUM_OVERLAY_HEIGHT,
+        MAXIMUM_OVERLAY_HEIGHT,
+        "Caption window height",
+    );
+    let presentation_controls = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+    presentation_controls.set_margin_top(8);
+    presentation_controls.append(&gtk::Label::new(Some("Font")));
+    presentation_controls.append(&font_size);
+    presentation_controls.append(&gtk::Label::new(Some("Opacity")));
+    presentation_controls.append(&opacity);
+    presentation_controls.append(&gtk::Label::new(Some("Width")));
+    presentation_controls.append(&width);
+    presentation_controls.append(&gtk::Label::new(Some("Height")));
+    presentation_controls.append(&height);
 
     let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
     content.set_margin_start(24);
@@ -203,7 +227,8 @@ fn build_window(
     content.add_css_class("caption-panel");
     content.append(&error_revealer);
     content.append(&caption);
-    content.append(&controls);
+    content.append(&session_controls);
+    content.append(&presentation_controls);
 
     let toolbar = adw::ToolbarView::new();
     toolbar.add_top_bar(&adw::HeaderBar::new());
@@ -226,10 +251,19 @@ fn build_window(
     overlay_status.set_tooltip_text(Some(if layer_shell_active {
         "The compositor is keeping this caption window above normal windows."
     } else {
-        "Always-on-top is unavailable because this compositor does not support the Wayland layer-shell protocol."
+        "Always-on-top is unavailable because this environment does not support interactive Wayland layer-shell v4 presentation."
     }));
-    controls.append(&overlay_status);
+    presentation_controls.append(&overlay_status);
     window.set_resizable(true);
+
+    let resizable_window = window.clone();
+    width.connect_value_changed(move |control| {
+        resizable_window.set_default_width(control.value_as_int());
+    });
+    let resizable_window = window.clone();
+    height.connect_value_changed(move |control| {
+        resizable_window.set_default_height(control.value_as_int());
+    });
     window.present();
 
     let weak_application = application.downgrade();
@@ -299,14 +333,30 @@ fn set_caption_font(label: &gtk::Label, points: f64) {
     label.set_attributes(Some(&attributes));
 }
 
+fn dimension_control(value: i32, minimum: f64, maximum: f64, tooltip: &str) -> gtk::SpinButton {
+    let control = gtk::SpinButton::with_range(minimum, maximum, 20.0);
+    control.set_value(f64::from(value).clamp(minimum, maximum));
+    control.set_tooltip_text(Some(tooltip));
+    control.set_width_chars(4);
+    control
+}
+
 fn configure_overlay(window: &adw::ApplicationWindow, prefer_overlay: bool) -> bool {
     let wayland_display = gdk::Display::default()
         .is_some_and(|display| display.type_().name() == "GdkWaylandDisplay");
-    let layer_shell_active = prefer_overlay && wayland_display && gtk4_layer_shell::is_supported();
+    let protocol_version = if prefer_overlay && wayland_display {
+        gtk4_layer_shell::protocol_version()
+    } else {
+        0
+    };
+    let layer_shell_active =
+        overlay_protocol_is_usable(prefer_overlay, wayland_display, protocol_version);
     if !layer_shell_active {
         info!(
             prefer_overlay,
-            wayland_display, "layer-shell unavailable; using compositor-managed standard window"
+            wayland_display,
+            protocol_version,
+            "interactive layer-shell unavailable; using compositor-managed standard window"
         );
         return false;
     }
@@ -318,8 +368,16 @@ fn configure_overlay(window: &adw::ApplicationWindow, prefer_overlay: bool) -> b
     window.set_margin(Edge::Bottom, OVERLAY_BOTTOM_MARGIN);
     window.set_keyboard_mode(KeyboardMode::OnDemand);
     window.set_exclusive_zone(0);
-    info!("layer-shell overlay presentation enabled");
+    info!(protocol_version, "layer-shell overlay presentation enabled");
     true
+}
+
+fn overlay_protocol_is_usable(
+    prefer_overlay: bool,
+    wayland_display: bool,
+    protocol_version: u32,
+) -> bool {
+    prefer_overlay && wayland_display && protocol_version >= ON_DEMAND_KEYBOARD_PROTOCOL_VERSION
 }
 
 fn clamp_background_opacity(opacity: f64) -> f64 {
@@ -362,7 +420,10 @@ fn load_css(provider: &gtk::CssProvider, opacity: f64) {
 
 #[cfg(test)]
 mod tests {
-    use super::{CaptionUiOptions, MINIMUM_BACKGROUND_OPACITY, clamp_background_opacity};
+    use super::{
+        CaptionUiOptions, MINIMUM_BACKGROUND_OPACITY, clamp_background_opacity,
+        overlay_protocol_is_usable,
+    };
 
     #[test]
     fn overlay_options_default_to_a_readable_translucent_surface() {
@@ -381,5 +442,13 @@ mod tests {
             clamp_background_opacity(f64::NAN),
             CaptionUiOptions::default().background_opacity
         );
+    }
+
+    #[test]
+    fn overlay_requires_wayland_and_on_demand_keyboard_protocol() {
+        assert!(overlay_protocol_is_usable(true, true, 4));
+        assert!(!overlay_protocol_is_usable(true, true, 3));
+        assert!(!overlay_protocol_is_usable(true, false, 4));
+        assert!(!overlay_protocol_is_usable(false, true, 4));
     }
 }
