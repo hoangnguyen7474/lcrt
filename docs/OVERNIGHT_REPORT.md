@@ -20,6 +20,7 @@ No change was merged into `main`.
 - Milestone 6, quality and latency pass: PR #9.
 - Milestone 7, compile-only portable-core checks: PR #10.
 - Final factual report delivery: PR #11.
+- Terminal state reconciliation: PR #12.
 
 ## Exact features implemented
 
@@ -91,7 +92,7 @@ No change was merged into `main`.
 
 ## CI verification actually performed
 
-- PRs #4–#10 passed the required Ubuntu 24.04 CI gate before merge: formatting,
+- PRs #4–#12 passed the required Ubuntu 24.04 CI gate before merge: formatting,
   Clippy across all targets/features with warnings denied, and workspace tests.
 - PR #5 CI initially failed because the bindings requested PipeWire 1.2 headers
   while Ubuntu 24.04 supplied PipeWire 1.0 development headers. The feature

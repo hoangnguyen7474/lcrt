@@ -13,6 +13,7 @@ Updated: 2026-08-25 (Asia/Ho_Chi_Minh)
 - Milestone 6 — Quality and latency pass (PR #9).
 - Milestone 7 — Portability preparation (PR #10).
 - Final overnight report (PR #11).
+- Terminal state reconciliation (PR #12).
 
 ## Merged PRs
 
@@ -25,10 +26,11 @@ Updated: 2026-08-25 (Asia/Ho_Chi_Minh)
 - #9 — sustained-load STT catch-up, PCM ownership transfer, and stage timing.
 - #10 — compile-only portable-core checks for Ubuntu ARM64 and Windows x64.
 - #11 — final factual overnight report.
+- #12 — terminal progress/report reconciliation.
 
 ## Current milestone
 
-- Terminal state reconciliation (`docs/finalize-overnight-state`): awaiting PR/CI.
+- Overnight run complete; no active milestone.
 
 ## Tests actually run
 
@@ -47,6 +49,7 @@ Updated: 2026-08-25 (Asia/Ho_Chi_Minh)
 - Milestone 7 PR #10 CI passed the full Ubuntu AMD64 formatting/Clippy/test gate plus compile-only `lcrt-core` checks for `aarch64-unknown-linux-gnu` and `x86_64-pc-windows-msvc`.
 - Final report: formatting, Clippy with warnings denied, workspace tests (24 unit tests, 0 failures), rustdoc with warnings denied, and `git diff --check` passed locally.
 - Final report PR #11 CI passed the full Ubuntu AMD64 gate plus both compile-only portable-core target checks.
+- Terminal state PR #12 passed the full Ubuntu AMD64 gate plus both compile-only portable-core target checks.
 
 ## Runtime verification actually performed
 
@@ -71,4 +74,4 @@ Updated: 2026-08-25 (Asia/Ho_Chi_Minh)
 
 ## Next planned milestone
 
-- Merge the terminal factual state update, synchronize `develop`, and end the overnight run.
+- Human-directed next milestone: complete the Ubuntu V1 always-on-top/transparent overlay slice and verify audible microphone latency.
