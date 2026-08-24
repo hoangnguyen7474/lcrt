@@ -28,11 +28,18 @@ The core contains no PipeWire, GTK, Wayland, WASAPI, or speech-engine APIs.
 
 ## Platform adapters
 
-Linux V1 adapters will own PipeWire capture, local whisper.cpp integration, and
-GTK4/libadwaita presentation. They translate native failures into actionable
-typed boundary errors. Windows adapters can later implement the same ports with
-WASAPI and a native Windows UI without changing caption domain logic.
+Linux V1 adapters own PipeWire capture, local whisper.cpp integration, and
+GTK4/libadwaita presentation. The `lcrt-app` binary enumerates sources and owns
+only lifecycle orchestration: a controller thread starts a cancellable pipeline
+worker while the GTK main thread remains dedicated to presentation. Adapters
+translate native failures into actionable typed boundary errors. Windows
+adapters can later implement the same ports with WASAPI and a native Windows UI
+without changing caption domain logic.
 
 Audio adapters must bound their queues and honor the requested poll timeout.
 Transcription work must not run on a UI thread. UI sinks should enqueue or apply
 small immutable snapshots and must not perform speech inference.
+
+On Stop, the portable pipeline ends PipeWire capture before flushing the final
+STT window. This prevents new audio from filling queues during inference while
+still allowing the last buffered utterance to become a final caption.

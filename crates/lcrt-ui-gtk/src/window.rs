@@ -6,6 +6,7 @@ use std::{
 };
 
 use gtk::{gdk, glib, pango, prelude::*};
+use lcrt_core::{AudioSourceDescriptor, AudioSourceKind};
 use libadwaita as adw;
 
 use crate::{CaptionUiAction, UiEvent};
@@ -22,6 +23,8 @@ pub struct CaptionUiOptions {
     pub height: i32,
     /// Initial caption font size in points.
     pub font_size_points: f64,
+    /// PipeWire sources available for the current application session.
+    pub sources: Vec<AudioSourceDescriptor>,
 }
 
 impl Default for CaptionUiOptions {
@@ -30,6 +33,7 @@ impl Default for CaptionUiOptions {
             width: 760,
             height: 320,
             font_size_points: 32.0,
+            sources: Vec::new(),
         }
     }
 }
@@ -92,14 +96,49 @@ fn build_window(
         .tooltip_text("Start or stop caption processing")
         .build();
     start_stop.add_css_class("suggested-action");
+    let sources = Rc::new(options.sources.clone());
+    let source_labels = sources
+        .iter()
+        .map(|source| {
+            let kind = match source.kind() {
+                AudioSourceKind::Microphone => "Microphone",
+                AudioSourceKind::SystemOutput => "System audio",
+            };
+            format!("{kind} — {}", source.name())
+        })
+        .collect::<Vec<_>>();
+    let source_label_refs = source_labels.iter().map(String::as_str).collect::<Vec<_>>();
+    let source_picker = gtk::DropDown::from_strings(&source_label_refs);
+    source_picker.set_tooltip_text(Some("Audio source"));
+    source_picker.set_hexpand(true);
+    if sources.is_empty() {
+        source_picker.set_sensitive(false);
+        start_stop.set_sensitive(false);
+        error_label.set_text("No PipeWire microphone or system-audio source is available.");
+        error_revealer.set_reveal_child(true);
+    }
     let action_error = error_label.clone();
     let action_revealer = error_revealer.clone();
     let action_running = Rc::clone(&running);
+    let action_sources = Rc::clone(&sources);
+    let action_source_picker = source_picker.clone();
     start_stop.connect_clicked(move |_| {
         let action = if action_running.get() {
             CaptionUiAction::Stop
         } else {
-            CaptionUiAction::Start
+            let Ok(index) = usize::try_from(action_source_picker.selected()) else {
+                action_error.set_text("Select an audio source before starting captions.");
+                action_revealer.set_reveal_child(true);
+                return;
+            };
+            let Some(source) = action_sources.get(index) else {
+                action_error.set_text("Select an audio source before starting captions.");
+                action_revealer.set_reveal_child(true);
+                return;
+            };
+            CaptionUiAction::Start {
+                source_id: source.id().to_owned(),
+            }
         };
         if actions.try_send(action).is_err() {
             action_error.set_text("Caption controller is busy or unavailable.");
@@ -120,6 +159,7 @@ fn build_window(
 
     let controls = gtk::Box::new(gtk::Orientation::Horizontal, 12);
     controls.set_margin_top(12);
+    controls.append(&source_picker);
     controls.append(&start_stop);
     controls.append(&caption_status);
     controls.append(&gtk::Label::new(Some("Font")));
@@ -170,6 +210,7 @@ fn build_window(
                 }
                 UiEvent::Running(is_running) => {
                     running.set(is_running);
+                    source_picker.set_sensitive(!is_running && !sources.is_empty());
                     start_stop.set_label(if is_running { "Stop" } else { "Start" });
                     if is_running {
                         start_stop.remove_css_class("suggested-action");
@@ -181,6 +222,7 @@ fn build_window(
                         caption_status.set_text("Stopped");
                     }
                 }
+                UiEvent::Status(status) => caption_status.set_text(&status),
                 UiEvent::Error(message) => {
                     error_label.set_text(&message);
                     error_revealer.set_reveal_child(true);

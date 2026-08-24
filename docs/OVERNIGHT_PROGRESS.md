@@ -8,6 +8,7 @@ Updated: 2026-08-25 (Asia/Ho_Chi_Minh)
 - Milestone 1 — Application architecture (PR #4).
 - Milestone 2 — Real Linux PipeWire audio (PR #5).
 - Milestone 3 — Local real-time speech-to-text (PR #6).
+- Milestone 4 — Native Ubuntu caption UI (PR #7).
 
 ## Merged PRs
 
@@ -15,10 +16,11 @@ Updated: 2026-08-25 (Asia/Ho_Chi_Minh)
 - #4 — portable application architecture.
 - #5 — bounded real PipeWire microphone/system-output capture.
 - #6 — bounded local whisper.cpp speech-to-text.
+- #7 — native GTK4/libadwaita caption window and bounded UI bridge.
 
 ## Current milestone
 
-- Milestone 4 — Native Ubuntu caption UI (`feat/native-caption-ui`): in progress.
+- Milestone 5 — End-to-end V1 (`feat/end-to-end-v1`): in progress.
 
 ## Tests actually run
 
@@ -29,7 +31,8 @@ Updated: 2026-08-25 (Asia/Ho_Chi_Minh)
 - Milestone 2: formatting, Clippy with warnings denied, workspace tests (14 unit tests, 0 failures), rustdoc with warnings denied, and `git diff --check` passed.
 - Milestone 2 PR #5 CI attempt 1 failed during Clippy because the binding requested PipeWire 1.2 headers on Ubuntu 24.04's PipeWire 1.0 development environment. The feature floor was lowered to 1.0; CI attempt 2 passed formatting, Clippy, and tests.
 - Milestone 3: formatting, Clippy with warnings denied, workspace tests (19 unit tests, 0 failures), rustdoc with warnings denied, downloader shell syntax, and `git diff --check` passed locally. The STT crate compiles whisper.cpp on Ubuntu AMD64 with Rust 1.85-compatible `whisper-rs` 0.15.1. PR #6 CI passed formatting, Clippy, and tests.
-- Milestone 4 (in progress): GTK/libadwaita workspace check, formatting, Clippy with warnings denied, workspace tests (22 unit tests, 0 failures), rustdoc with warnings denied, and `git diff --check` passed locally.
+- Milestone 4: GTK/libadwaita workspace check, formatting, Clippy with warnings denied, workspace tests (22 unit tests, 0 failures), rustdoc with warnings denied, and `git diff --check` passed locally. PR #7 CI passed formatting, Clippy, and tests.
+- Milestone 5 (in progress): workspace check, formatting, Clippy with warnings denied, workspace tests (24 unit tests, 0 failures), rustdoc with warnings denied, and `git diff --check` passed locally.
 
 ## Runtime verification actually performed
 
@@ -40,6 +43,9 @@ Updated: 2026-08-25 (Asia/Ho_Chi_Minh)
 - Post-smoke inspection found no remaining LCRT PipeWire node or capture process.
 - Milestone 3: the CPU-only tiny English model transcribed the official 11-second, 16 kHz mono JFK sample to incremental partials and the correct final sentence. A warm direct diagnostic run took 8.75 seconds elapsed with 223,400 KiB maximum RSS. This is a local diagnostic measurement, not live end-to-end latency.
 - Milestone 4: the GTK4/libadwaita caption window launched on the active Ubuntu GNOME Wayland session, processed deterministic incremental/final caption events, and exited on its own; the final run completed in 4.3 seconds. The initial smoke run exposed GTK command-line parsing of `--smoke-test`; the app now consumes diagnostic arguments before GTK, and subsequent runs passed. No UI process remained afterward. Visual appearance was not screenshot-verified.
+- Milestone 5: integrated source discovery returned the real built-in microphone and system-output sink. A five-second microphone → local Whisper → GTK run processed 230 chunks and zero captions because the host microphone remained muted, then stopped cleanly. An 18-second system-output run played the official 11-second JFK WAV through PipeWire, processed 841 chunks, published 12 caption updates, and exited cleanly.
+- The first integrated system-output run reported 37 audio chunks dropped during Whisper flush because capture was stopped afterward. Core shutdown ordering was changed to stop capture before STT flush; the identical final run processed 841 chunks/12 updates with no drop warning. A bounded invalid-model run surfaced the actionable missing-model error and exited cleanly.
+- Post-run `wpctl` and process inspection found no remaining LCRT PipeWire node, integrated app, or standalone UI process.
 
 ## Known blockers
 
@@ -47,4 +53,4 @@ Updated: 2026-08-25 (Asia/Ho_Chi_Minh)
 
 ## Next planned milestone
 
-- Deliver Milestone 4 through PR/CI/merge, then integrate PipeWire, local Whisper, caption state, and the GTK window into the runnable V1 application.
+- Deliver Milestone 5 through PR/CI/merge, then inspect latency, buffering, unnecessary copies, error propagation, and thread/resource cleanup with measured instrumentation where useful.

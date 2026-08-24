@@ -25,6 +25,49 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-features
 ```
 
+## Run live captions on Ubuntu
+
+Use a stable Rust toolchain on a PipeWire-based desktop and install the native
+development prerequisites on Ubuntu 24.04 or newer:
+
+```sh
+sudo apt install build-essential clang cmake libadwaita-1-dev libgtk-4-dev \
+  libpipewire-0.3-dev libspa-0.2-dev pkg-config
+```
+
+Download the checksum-verified tiny English model, build, and launch the native
+application:
+
+```sh
+./scripts/download-whisper-model.sh
+cargo build -p lcrt-app --bin lcrt
+cargo run -p lcrt-app --bin lcrt -- --model models/ggml-tiny.en.bin --language en
+```
+
+`LCRT_MODEL_PATH` may be set instead of passing `--model`. The application does
+not download a model implicitly and never sends captured audio to a remote
+service.
+
+In the window, select a source labeled **Microphone** for spoken input or
+**System audio** for sound playing through the selected output sink, then press
+Start. Partial captions replace themselves as recognition improves; Stop first
+ends PipeWire capture and then flushes the final local transcript. Model,
+device, capture, and transcription failures are shown in the window.
+
+For source IDs and bounded diagnostics:
+
+```sh
+cargo run -p lcrt-app --bin lcrt -- --list-sources
+cargo run -p lcrt-app --bin lcrt -- \
+  --model models/ggml-tiny.en.bin --smoke-source SOURCE_ID --smoke-seconds 10
+```
+
+Current limitations: the tiny model is CPU-only and English-focused; source
+discovery occurs at launch; always-on-top and transparent overlay behavior are
+not yet implemented; and responsiveness depends on model, CPU, language, and
+audio conditions. The bounded smoke option is intended for diagnostics, not
+normal use.
+
 ### Linux audio development
 
 PipeWire capture development requires `libpipewire-0.3-dev`,
