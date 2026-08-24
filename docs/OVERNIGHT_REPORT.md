@@ -23,7 +23,7 @@ otherwise. No change was merged into `main`.
 - Milestone 7, compile-only portable-core checks: PR #10.
 - Final factual report delivery: PR #11.
 - Terminal state reconciliation: PR #12.
-- Milestone 8, native overlay presentation: PR #13 open; CI pending.
+- Milestone 8, native overlay presentation: PR #13.
 
 ## Exact features implemented
 
@@ -49,8 +49,9 @@ otherwise. No change was merged into `main`.
   privacy-safe stage timing that does not log caption text.
 - CI compile-only checks of `lcrt-core` for Ubuntu ARM64 and Windows x64 targets.
 - Adjustable 30–100% caption-surface opacity, capability-based Wayland
-  layer-shell placement in the overlay layer, bottom anchoring, on-demand
-  keyboard focus, and an honest in-window pinned/standard presentation status.
+  layer-shell v4 placement in the overlay layer, bottom anchoring, on-demand
+  keyboard focus, explicit width/height controls, and an honest in-window
+  pinned/standard presentation status.
 
 ## Local verification actually performed
 
@@ -97,11 +98,14 @@ otherwise. No change was merged into `main`.
 - Formatting, Clippy for all workspace targets/features with warnings denied,
   workspace tests, rustdoc with warnings denied, and `git diff --check` passed
   at each applicable milestone.
-- The workspace test count grew from 8 at Milestone 1 to 26 at Milestone 8;
+- The workspace test count grew from 8 at Milestone 1 to 27 after the PR #13
+  review corrections;
   all recorded runs had zero failures.
-- The final Milestone 8 local gate used the repository-pinned stable Rust 1.98.0
-  toolchain from `~/.cargo`; formatting, warnings-denied Clippy, all 26 tests,
-  rustdoc with warnings denied, and `git diff --check` passed.
+- The original Milestone 8 local gate used the repository-pinned stable Rust
+  1.98.0 toolchain from `~/.cargo`; formatting, warnings-denied Clippy, all 26
+  tests, rustdoc with warnings denied, and `git diff --check` passed. The review
+  correction gate passed the same checks with 27 tests plus workflow parsing
+  and installer shell syntax.
 - Workflow YAML parsing and a locked host check of `lcrt-core` passed for
   Milestone 7.
 
@@ -116,11 +120,17 @@ otherwise. No change was merged into `main`.
   `aarch64-unknown-linux-gnu` and `x86_64-pc-windows-msvc`.
 - CI did not exercise PipeWire hardware, Whisper model inference, GTK display,
   or any platform runtime.
-- Milestone 8 CI is pending; no CI result is claimed for its overlay changes.
 - PR #13 CI attempt 1 passed both compile-only portable-core jobs but failed the
   Ubuntu gate before Rust setup because Ubuntu 24.04 lacks a GTK4 layer-shell
   development package. A checksum-pinned 1.0.4 source build was added and
-  compiled locally; its CI result is pending.
+  compiled locally.
+- PR #13 CI attempt 2 passed the Ubuntu 24.04 formatting, Clippy, and workspace
+  test gate plus both portable-core compile checks, then squash-merged into
+  `develop`.
+- The two valid automated review findings were corrected locally after the
+  automatic merge: pinned mode now requires protocol v4 for usable on-demand
+  keyboard focus, and explicit size controls preserve layer-surface resizing.
+  Their final corrective PR CI result is pending.
 
 ## Measured latency and performance
 
@@ -200,6 +210,7 @@ be interpreted as an end-to-end latency claim.
 
 ## Recommended next step
 
-Land the Milestone 8 overlay PR, then validate its pinned mode on a
-layer-shell-capable compositor and repeat an audible microphone end-to-end run
-with speech-onset-to-visible-caption timing.
+After the final review-correction PR lands, stop autonomous development. The
+recommended human-directed next step is to validate pinned mode on a
+layer-shell-capable compositor, then repeat an audible microphone end-to-end
+run with speech-onset-to-visible-caption timing.

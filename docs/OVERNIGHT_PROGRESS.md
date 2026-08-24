@@ -12,7 +12,7 @@ Updated: 2026-08-25 (Asia/Ho_Chi_Minh)
 - Milestone 5 — End-to-end Ubuntu V1 (PR #8).
 - Milestone 6 — Quality and latency pass (PR #9).
 - Milestone 7 — Portability preparation (PR #10).
-- Milestone 8 — Native overlay presentation (PR #13; CI pending).
+- Milestone 8 — Native overlay presentation (PR #13).
 - Final overnight report (PR #11).
 - Terminal state reconciliation (PR #12).
 
@@ -28,10 +28,11 @@ Updated: 2026-08-25 (Asia/Ho_Chi_Minh)
 - #10 — compile-only portable-core checks for Ubuntu ARM64 and Windows x64.
 - #11 — final factual overnight report.
 - #12 — terminal progress/report reconciliation.
+- #13 — translucent, capability-based native overlay presentation.
 
 ## Current milestone
 
-- Milestone 8 — Native overlay presentation (PR #13): local verification complete; CI/review pending.
+- PR #13 review reconciliation (`fix/overlay-review-findings`): local verification complete; final corrective PR pending.
 
 ## Tests actually run
 
@@ -53,7 +54,9 @@ Updated: 2026-08-25 (Asia/Ho_Chi_Minh)
 - Terminal state PR #12 passed the full Ubuntu AMD64 gate plus both compile-only portable-core target checks.
 - Proper rustup-toolchain recheck: stable Rust 1.98.0 from `~/.cargo` passed formatting, Clippy with warnings denied, and workspace tests (24 unit tests, 0 failures). The first Clippy attempt was blocked by a read-only system `ccache`; rerunning with `CCACHE_DISABLE=1` passed without using the retired `/tmp` Rust fallback.
 - Milestone 8: stable Rust 1.98.0 from `~/.cargo` passed formatting, Clippy across all workspace targets/features with warnings denied, workspace tests (26 unit tests, 0 failures), rustdoc with warnings denied, and `git diff --check`.
-- Milestone 8 PR #13 CI attempt 1: both portable-core checks passed; the Ubuntu gate failed before Rust setup because Ubuntu 24.04 does not package `libgtk4-layer-shell-dev`. The workflow now builds checksum-pinned gtk4-layer-shell 1.0.4 from source; its exact Meson configuration compiled locally. CI retry is pending.
+- Milestone 8 PR #13 CI attempt 1: both portable-core checks passed; the Ubuntu gate failed before Rust setup because Ubuntu 24.04 does not package `libgtk4-layer-shell-dev`. The workflow now builds checksum-pinned gtk4-layer-shell 1.0.4 from source; its exact Meson configuration compiled locally.
+- Milestone 8 PR #13 CI attempt 2 passed the Ubuntu AMD64 formatting/Clippy/test gate and both compile-only portable-core checks; PR #13 squash-merged into `develop`.
+- PR #13 review reconciliation: stable Rust 1.98.0 from `~/.cargo` passed formatting, Clippy across all workspace targets/features with warnings denied, workspace tests (27 unit tests, 0 failures), rustdoc with warnings denied, workflow YAML parsing, installer shell syntax, and `git diff --check`.
 
 ## Runtime verification actually performed
 
@@ -72,6 +75,7 @@ Updated: 2026-08-25 (Asia/Ho_Chi_Minh)
 - A 35.36-second system-output soak played the 11-second JFK sample twice, processed 1,498 chunks/14 caption updates, exited successfully with no queue warning, and peaked at 350,876 KiB RSS. Post-run inspection found no LCRT process or PipeWire node.
 - Milestone 7: no ARM64 or Windows runtime verification was performed; the added checks are compile-only and cover `lcrt-core`, not platform adapters or complete applications.
 - Milestone 8: the GTK UI launched and exited cleanly on the active GNOME Wayland desktop. LCRT detected that layer shell is unavailable and used the standard-window fallback. A 15-second integrated system-output run replayed the local JFK fixture, processed 435 chunks, published 6 caption updates, and stopped cleanly. CSS loaded without parser errors, but transparency was not screenshot-verified because desktop screenshot access was denied and no isolated in-app browser was available. The pinned-overlay path was compile-tested only, not runtime-tested on a supporting compositor.
+- PR #13 review reconciliation: the corrected GTK UI launched and exited cleanly on GNOME Wayland. This reverified initialization of the standard-window fallback and explicit size controls; pinned mode remains untested on a supporting compositor.
 
 ## Known blockers
 
@@ -81,4 +85,4 @@ Updated: 2026-08-25 (Asia/Ho_Chi_Minh)
 
 ## Next planned milestone
 
-- Monitor Milestone 8 PR #13 CI and review, merge it into `develop`, then reconcile the final report and terminal progress state through the normal PR workflow.
+- Open the final narrowly scoped PR for PR #13 review fixes and terminal documentation, pass CI, merge it into `develop`, synchronize locally, and stop development.

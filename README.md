@@ -68,11 +68,13 @@ cargo run -p lcrt-app --bin lcrt -- \
   --model models/ggml-tiny.en.bin --smoke-source SOURCE_ID --smoke-seconds 10
 ```
 
-The caption surface starts translucent and exposes an opacity control. On
-Wayland compositors that advertise the layer-shell protocol, it is anchored
-near the bottom in the overlay layer; the window reports `Pinned overlay`.
-GNOME Wayland and X11 do not support that protocol, so LCRT reports `Standard
-window` and keeps transparency but cannot enforce always-on-top there.
+The caption surface starts translucent and exposes opacity, width, and height
+controls. On Wayland compositors that advertise layer-shell protocol v4 or
+newer, it is anchored near the bottom in the overlay layer; the window reports
+`Pinned overlay`. The explicit size controls preserve resizing because layer
+surfaces do not have compositor-provided resize handles. GNOME Wayland, X11,
+and older protocol versions use `Standard window`; transparency remains, but
+LCRT cannot enforce always-on-top there.
 
 Current limitations: the tiny model is CPU-only and English-focused; source
 discovery occurs at launch; and responsiveness depends on model, CPU, language,

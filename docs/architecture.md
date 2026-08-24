@@ -48,7 +48,9 @@ STT window. This prevents new audio from filling queues during inference while
 still allowing the last buffered utterance to become a final caption.
 
 The Linux UI selects overlay placement by compositor capability. When the
-Wayland compositor advertises `zwlr_layer_shell_v1`, the window uses the overlay
-layer, a bottom anchor, no exclusive zone, and on-demand keyboard focus. Other
-compositors retain the same translucent GTK presentation as a normal window and
-surface that limitation to the user instead of claiming always-on-top behavior.
+Wayland compositor advertises `zwlr_layer_shell_v1` protocol v4 or newer, the
+window uses the overlay layer, a bottom anchor, no exclusive zone, and on-demand
+keyboard focus. Explicit width and height controls preserve resizing for layer
+surfaces, which have no compositor resize handles. Other compositors retain the
+same translucent GTK presentation as a normal window and surface that
+limitation to the user instead of claiming always-on-top behavior.
