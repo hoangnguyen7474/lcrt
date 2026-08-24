@@ -12,6 +12,7 @@ workspace = true
 
 [dependencies]
 gtk = { package = "gtk4", version = "0.10.3" }
+gtk4-layer-shell = "=0.7.1"
 lcrt-core = { path = "../lcrt-core" }
 libadwaita = { version = "0.8.0", features = ["v1_4"] }
 tracing = { version = "0.1.41", default-features = false, features = ["std"] }

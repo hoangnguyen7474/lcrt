@@ -32,7 +32,7 @@ development prerequisites on Ubuntu 24.04 or newer:
 
 ```sh
 sudo apt install build-essential clang cmake libadwaita-1-dev libgtk-4-dev \
-  libpipewire-0.3-dev libspa-0.2-dev pkg-config
+  libgtk4-layer-shell-dev libpipewire-0.3-dev libspa-0.2-dev pkg-config
 ```
 
 Download the checksum-verified tiny English model, build, and launch the native
@@ -62,11 +62,16 @@ cargo run -p lcrt-app --bin lcrt -- \
   --model models/ggml-tiny.en.bin --smoke-source SOURCE_ID --smoke-seconds 10
 ```
 
+The caption surface starts translucent and exposes an opacity control. On
+Wayland compositors that advertise the layer-shell protocol, it is anchored
+near the bottom in the overlay layer; the window reports `Pinned overlay`.
+GNOME Wayland and X11 do not support that protocol, so LCRT reports `Standard
+window` and keeps transparency but cannot enforce always-on-top there.
+
 Current limitations: the tiny model is CPU-only and English-focused; source
-discovery occurs at launch; always-on-top and transparent overlay behavior are
-not yet implemented; and responsiveness depends on model, CPU, language, and
-audio conditions. The bounded smoke option is intended for diagnostics, not
-normal use.
+discovery occurs at launch; and responsiveness depends on model, CPU, language,
+and audio conditions. The bounded smoke option is intended for diagnostics,
+not normal use.
 
 ### Linux audio development
 

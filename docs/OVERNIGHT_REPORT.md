@@ -6,8 +6,10 @@ Date: 2026-08-25 (Asia/Ho_Chi_Minh)
 
 LCRT now has an implemented and locally runtime-tested Ubuntu AMD64 V1 vertical
 slice: native PipeWire microphone/system-output capture feeds bounded local
-Whisper transcription, portable caption state, and a GTK4/libadwaita window.
-No change was merged into `main`.
+Whisper transcription, portable caption state, and a translucent
+GTK4/libadwaita caption window. The window uses a pinned layer-shell overlay
+when the compositor supports it and an explicit standard-window fallback
+otherwise. No change was merged into `main`.
 
 ## Completed milestones and merged PRs
 
@@ -21,6 +23,7 @@ No change was merged into `main`.
 - Milestone 7, compile-only portable-core checks: PR #10.
 - Final factual report delivery: PR #11.
 - Terminal state reconciliation: PR #12.
+- Milestone 8, native overlay presentation: implemented locally; PR/CI pending.
 
 ## Exact features implemented
 
@@ -45,6 +48,9 @@ No change was merged into `main`.
   STT clone, backlog coalescing to avoid redundant stale inference, and
   privacy-safe stage timing that does not log caption text.
 - CI compile-only checks of `lcrt-core` for Ubuntu ARM64 and Windows x64 targets.
+- Adjustable 30–100% caption-surface opacity, capability-based Wayland
+  layer-shell placement in the overlay layer, bottom anchoring, on-demand
+  keyboard focus, and an honest in-window pinned/standard presentation status.
 
 ## Local verification actually performed
 
@@ -79,14 +85,23 @@ No change was merged into `main`.
   350,876 KiB RSS.
 - Post-run process and PipeWire inspection found no remaining LCRT process or
   PipeWire node.
+- Milestone 8 GTK smoke testing on GNOME Wayland detected the unsupported
+  layer-shell capability and cleanly exercised the standard-window fallback.
+  An integrated 15-second replay processed 435 system-output chunks, published
+  6 caption updates, and stopped cleanly. CSS loaded without parser errors.
+  Transparency was not screenshot-verified, and the pinned-overlay path was not
+  runtime-tested because this host compositor does not advertise layer shell.
 
 ### Local automated checks
 
 - Formatting, Clippy for all workspace targets/features with warnings denied,
   workspace tests, rustdoc with warnings denied, and `git diff --check` passed
   at each applicable milestone.
-- The workspace test count grew from 8 at Milestone 1 to 24 at Milestones 5–7;
+- The workspace test count grew from 8 at Milestone 1 to 26 at Milestone 8;
   all recorded runs had zero failures.
+- The final Milestone 8 local gate used the repository-pinned stable Rust 1.98.0
+  toolchain from `~/.cargo`; formatting, warnings-denied Clippy, all 26 tests,
+  rustdoc with warnings denied, and `git diff --check` passed.
 - Workflow YAML parsing and a locked host check of `lcrt-core` passed for
   Milestone 7.
 
@@ -101,6 +116,7 @@ No change was merged into `main`.
   `aarch64-unknown-linux-gnu` and `x86_64-pc-windows-msvc`.
 - CI did not exercise PipeWire hardware, Whisper model inference, GTK display,
   or any platform runtime.
+- Milestone 8 CI is pending; no CI result is claimed for its overlay changes.
 
 ## Measured latency and performance
 
@@ -123,9 +139,11 @@ be interpreted as an end-to-end latency claim.
 ### Ubuntu AMD64
 
 - Implemented: V1 microphone/system-output capture, local STT, native UI, and
-  integrated application.
+  integrated application. Adjustable transparency and the compositor-capable
+  overlay path are implemented.
 - Runtime-tested: yes, on the local GNOME Wayland/PipeWire desktop as detailed
-  above.
+  above. The standard-window fallback was runtime-tested; pinned layer-shell
+  behavior was not.
 - CI-tested: yes, on Ubuntu 24.04 for formatting, Clippy, and tests.
 - Not tested: audible live microphone transcription, screenshot-level visual
   quality, multi-hour operation, packaging/installers, and X11 runtime.
@@ -149,7 +167,10 @@ be interpreted as an end-to-end latency claim.
 
 - The host microphone was muted, so real audible microphone-to-caption behavior
   remains unverified despite successful microphone capture plumbing.
-- Always-on-top and transparent overlay behavior are not implemented.
+- GNOME Wayland does not advertise layer shell, so it cannot enforce
+  always-on-top; LCRT reports and uses its translucent standard-window fallback.
+- Pinned-overlay behavior is compile-tested only and still needs runtime testing
+  on a compositor that supports `zwlr_layer_shell_v1`.
 - Audio sources are discovered at launch; hot-plug refresh is not implemented.
 - The current tiny model is CPU-only and English-focused. Inference is the
   dominant measured stage and responsiveness depends on model, CPU, language,
@@ -162,8 +183,8 @@ be interpreted as an end-to-end latency claim.
 
 ## Unfinished work
 
-- Finish the Ubuntu overlay experience: always-on-top behavior, transparency,
-  and screenshot-verified presentation.
+- Runtime-test pinned-overlay behavior on a layer-shell compositor and perform
+  screenshot-level visual verification of both presentation modes.
 - Repeat microphone runtime validation with an audible source and measure true
   speech-onset-to-visible-caption latency.
 - Add source hot-plug refresh, longer soak coverage, release packaging, and X11
@@ -175,6 +196,6 @@ be interpreted as an end-to-end latency claim.
 
 ## Recommended next step
 
-Complete the Ubuntu V1 overlay slice: implement supported always-on-top and
-transparency behavior, visually verify it on GNOME Wayland, then repeat an
-audible microphone end-to-end run with speech-onset-to-visible-caption timing.
+Land the Milestone 8 overlay PR, then validate its pinned mode on a
+layer-shell-capable compositor and repeat an audible microphone end-to-end run
+with speech-onset-to-visible-caption timing.

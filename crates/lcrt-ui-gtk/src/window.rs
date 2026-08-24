@@ -6,14 +6,17 @@ use std::{
 };
 
 use gtk::{gdk, glib, pango, prelude::*};
+use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 use lcrt_core::{AudioSourceDescriptor, AudioSourceKind};
 use libadwaita as adw;
-use tracing::debug;
+use tracing::{debug, info};
 
 use crate::{CaptionUiAction, UiEvent};
 
 const APPLICATION_ID: &str = "io.github.hoangnguyen7474.Lcrt";
 const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(16);
+const MINIMUM_BACKGROUND_OPACITY: f64 = 0.3;
+const OVERLAY_BOTTOM_MARGIN: i32 = 36;
 
 /// Initial native-window presentation settings.
 #[derive(Clone, Debug, PartialEq)]
@@ -24,6 +27,10 @@ pub struct CaptionUiOptions {
     pub height: i32,
     /// Initial caption font size in points.
     pub font_size_points: f64,
+    /// Initial opacity of the window surfaces behind text and controls.
+    pub background_opacity: f64,
+    /// Prefer compositor-managed always-on-top presentation when supported.
+    pub prefer_overlay: bool,
     /// PipeWire sources available for the current application session.
     pub sources: Vec<AudioSourceDescriptor>,
 }
@@ -34,6 +41,8 @@ impl Default for CaptionUiOptions {
             width: 760,
             height: 320,
             font_size_points: 32.0,
+            background_opacity: 0.86,
+            prefer_overlay: true,
             sources: Vec::new(),
         }
     }
@@ -68,7 +77,7 @@ fn build_window(
     actions: std::sync::mpsc::SyncSender<CaptionUiAction>,
     options: &CaptionUiOptions,
 ) {
-    install_css();
+    let style_provider = install_css(options.background_opacity);
     let running = Rc::new(Cell::new(false));
     let caption = gtk::Label::builder()
         .label("Press Start to begin live captions")
@@ -158,6 +167,25 @@ fn build_window(
         set_caption_font(&font_caption, control.value());
     });
 
+    let opacity_adjustment = gtk::Adjustment::new(
+        clamp_background_opacity(options.background_opacity) * 100.0,
+        MINIMUM_BACKGROUND_OPACITY * 100.0,
+        100.0,
+        5.0,
+        10.0,
+        0.0,
+    );
+    let opacity = gtk::SpinButton::builder()
+        .adjustment(&opacity_adjustment)
+        .tooltip_text("Overlay background opacity")
+        .width_chars(3)
+        .build();
+    if let Some(provider) = style_provider {
+        opacity.connect_value_changed(move |control| {
+            load_css(&provider, control.value() / 100.0);
+        });
+    }
+
     let controls = gtk::Box::new(gtk::Orientation::Horizontal, 12);
     controls.set_margin_top(12);
     controls.append(&source_picker);
@@ -165,11 +193,14 @@ fn build_window(
     controls.append(&caption_status);
     controls.append(&gtk::Label::new(Some("Font")));
     controls.append(&font_size);
+    controls.append(&gtk::Label::new(Some("Opacity")));
+    controls.append(&opacity);
 
     let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
     content.set_margin_start(24);
     content.set_margin_end(24);
     content.set_margin_bottom(20);
+    content.add_css_class("caption-panel");
     content.append(&error_revealer);
     content.append(&caption);
     content.append(&controls);
@@ -184,6 +215,20 @@ fn build_window(
         .default_height(options.height)
         .content(&toolbar)
         .build();
+    window.add_css_class("caption-overlay");
+    let layer_shell_active = configure_overlay(&window, options.prefer_overlay);
+    let overlay_status = gtk::Label::new(Some(if layer_shell_active {
+        "Pinned overlay"
+    } else {
+        "Standard window"
+    }));
+    overlay_status.add_css_class("dim-label");
+    overlay_status.set_tooltip_text(Some(if layer_shell_active {
+        "The compositor is keeping this caption window above normal windows."
+    } else {
+        "Always-on-top is unavailable because this compositor does not support the Wayland layer-shell protocol."
+    }));
+    controls.append(&overlay_status);
     window.set_resizable(true);
     window.present();
 
@@ -254,17 +299,87 @@ fn set_caption_font(label: &gtk::Label, points: f64) {
     label.set_attributes(Some(&attributes));
 }
 
-fn install_css() {
-    let Some(display) = gdk::Display::default() else {
-        return;
-    };
+fn configure_overlay(window: &adw::ApplicationWindow, prefer_overlay: bool) -> bool {
+    let wayland_display = gdk::Display::default()
+        .is_some_and(|display| display.type_().name() == "GdkWaylandDisplay");
+    let layer_shell_active = prefer_overlay && wayland_display && gtk4_layer_shell::is_supported();
+    if !layer_shell_active {
+        info!(
+            prefer_overlay,
+            wayland_display, "layer-shell unavailable; using compositor-managed standard window"
+        );
+        return false;
+    }
+
+    window.init_layer_shell();
+    window.set_namespace(Some("lcrt-caption-overlay"));
+    window.set_layer(Layer::Overlay);
+    window.set_anchor(Edge::Bottom, true);
+    window.set_margin(Edge::Bottom, OVERLAY_BOTTOM_MARGIN);
+    window.set_keyboard_mode(KeyboardMode::OnDemand);
+    window.set_exclusive_zone(0);
+    info!("layer-shell overlay presentation enabled");
+    true
+}
+
+fn clamp_background_opacity(opacity: f64) -> f64 {
+    if opacity.is_finite() {
+        opacity.clamp(MINIMUM_BACKGROUND_OPACITY, 1.0)
+    } else {
+        CaptionUiOptions::default().background_opacity
+    }
+}
+
+fn install_css(opacity: f64) -> Option<gtk::CssProvider> {
+    let display = gdk::Display::default()?;
     let provider = gtk::CssProvider::new();
-    provider.load_from_data(
-        ".caption-text { padding: 20px; }\n.error { color: @error_color; padding: 10px; }",
-    );
+    load_css(&provider, opacity);
     gtk::style_context_add_provider_for_display(
         &display,
         &provider,
         gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
     );
+    Some(provider)
+}
+
+fn load_css(provider: &gtk::CssProvider, opacity: f64) {
+    let opacity = clamp_background_opacity(opacity);
+    provider.load_from_data(&format!(
+        "window.caption-overlay, window.caption-overlay > contents, \
+         window.caption-overlay toolbarview {{ background-color: transparent; }}\n\
+         window.caption-overlay headerbar {{ \
+             background-color: alpha(@headerbar_bg_color, {opacity:.3}); \
+             box-shadow: none; \
+         }}\n\
+         .caption-panel {{ \
+             background-color: alpha(@window_bg_color, {opacity:.3}); \
+             border-radius: 16px; \
+         }}\n\
+         .caption-text {{ padding: 20px; }}\n\
+         .error {{ color: @error_color; padding: 10px; }}"
+    ));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CaptionUiOptions, MINIMUM_BACKGROUND_OPACITY, clamp_background_opacity};
+
+    #[test]
+    fn overlay_options_default_to_a_readable_translucent_surface() {
+        let options = CaptionUiOptions::default();
+
+        assert!(options.prefer_overlay);
+        assert!(options.background_opacity < 1.0);
+        assert!(options.background_opacity >= MINIMUM_BACKGROUND_OPACITY);
+    }
+
+    #[test]
+    fn background_opacity_is_bounded_and_rejects_non_finite_values() {
+        assert_eq!(clamp_background_opacity(0.1), MINIMUM_BACKGROUND_OPACITY);
+        assert_eq!(clamp_background_opacity(1.5), 1.0);
+        assert_eq!(
+            clamp_background_opacity(f64::NAN),
+            CaptionUiOptions::default().background_opacity
+        );
+    }
 }
