@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+  pull_request:
+    branches:
+      - main
+      - develop
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ci-gate:
+    name: ci-gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Verify repository baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          test -f README.md
+          test -f LICENSE
+          test -f .gitignore
+
+          grep -q "MIT License" LICENSE
+
+      - name: Install Rust toolchain
+        if: ${{ hashFiles('Cargo.toml') != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          rustup toolchain install stable \
+            --profile minimal \
+            --component rustfmt \
+            --component clippy
+
+          rustup default stable
+
+      - name: Check Rust formatting
+        if: ${{ hashFiles('Cargo.toml') != '' }}
+        run: cargo fmt --all -- --check
+
+      - name: Run Clippy
+        if: ${{ hashFiles('Cargo.toml') != '' }}
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+      - name: Run Rust tests
+        if: ${{ hashFiles('Cargo.toml') != '' }}
+        run: cargo test --workspace --all-features
+
+      - name: Bootstrap status
+        if: ${{ hashFiles('Cargo.toml') == '' }}
+        run: echo "Rust workspace not created yet; repository baseline checks passed."
