@@ -6,15 +6,17 @@ Updated: 2026-08-25 (Asia/Ho_Chi_Minh)
 
 - Repository foundation (pre-existing, PR #3).
 - Milestone 1 — Application architecture (PR #4).
+- Milestone 2 — Real Linux PipeWire audio (PR #5).
 
 ## Merged PRs
 
 - #1, #2, #3 (pre-existing repository setup).
 - #4 — portable application architecture.
+- #5 — bounded real PipeWire microphone/system-output capture.
 
 ## Current milestone
 
-- Milestone 2 — Real Linux PipeWire audio (`feat/linux-pipewire-audio`): in progress.
+- Milestone 3 — Local real-time speech-to-text (`feat/local-whisper-stt`): in progress.
 
 ## Tests actually run
 
@@ -22,8 +24,9 @@ Updated: 2026-08-25 (Asia/Ho_Chi_Minh)
 - Milestone 1: `cargo clippy --workspace --all-targets --all-features -- -D warnings` passed.
 - Milestone 1: `cargo test --workspace --all-features` passed (8 unit tests, 0 failures).
 - Milestone 1: rustdoc with warnings denied passed; `git diff --check` passed.
-- Milestone 2 (in progress): formatting, Clippy with warnings denied, workspace tests (14 unit tests, 0 failures), rustdoc with warnings denied, and `git diff --check` passed.
-- Milestone 2 PR #5 CI attempt 1 failed during Clippy because the binding requested PipeWire 1.2 headers on Ubuntu 24.04's PipeWire 1.0 development environment. The feature floor was lowered to 1.0; all local gates passed again and CI rerun is pending.
+- Milestone 2: formatting, Clippy with warnings denied, workspace tests (14 unit tests, 0 failures), rustdoc with warnings denied, and `git diff --check` passed.
+- Milestone 2 PR #5 CI attempt 1 failed during Clippy because the binding requested PipeWire 1.2 headers on Ubuntu 24.04's PipeWire 1.0 development environment. The feature floor was lowered to 1.0; CI attempt 2 passed formatting, Clippy, and tests.
+- Milestone 3 (in progress): formatting, Clippy with warnings denied, workspace tests (19 unit tests, 0 failures), rustdoc with warnings denied, downloader shell syntax, and `git diff --check` passed locally. The STT crate compiles whisper.cpp on Ubuntu AMD64 with Rust 1.85-compatible `whisper-rs` 0.15.1.
 
 ## Runtime verification actually performed
 
@@ -32,6 +35,7 @@ Updated: 2026-08-25 (Asia/Ho_Chi_Minh)
 - Milestone 2 adapter: source enumeration returned the microphone and system-output target. A bounded 3-second microphone capture received 141 chunks/144,384 frames at 48 kHz stereo (peak 0 because the host source was muted). A bounded 3-second system-output capture received 142 chunks/145,408 frames at 48 kHz stereo (peak 0.990387). Both stopped cleanly.
 - After lowering the PipeWire API feature floor, a bounded 1-second system-output capture received 47 chunks/48,128 frames at 48 kHz stereo (peak 0.354764) and stopped cleanly.
 - Post-smoke inspection found no remaining LCRT PipeWire node or capture process.
+- Milestone 3: the CPU-only tiny English model transcribed the official 11-second, 16 kHz mono JFK sample to incremental partials and the correct final sentence. A warm direct diagnostic run took 8.75 seconds elapsed with 223,400 KiB maximum RSS. This is a local diagnostic measurement, not live end-to-end latency.
 
 ## Known blockers
 
@@ -39,4 +43,4 @@ Updated: 2026-08-25 (Asia/Ho_Chi_Minh)
 
 ## Next planned milestone
 
-- Implement bounded PipeWire microphone/system-output capture and source enumeration, then run local hardware smoke tests and deliver Milestone 2 through PR/CI/merge.
+- Deliver Milestone 3 through PR/CI/merge, then implement a native GTK4/libadwaita caption window with start/stop controls, incremental text presentation, resizing, and visible errors.

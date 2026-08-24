@@ -39,3 +39,28 @@ cargo run -p lcrt-audio-pipewire --bin lcrt-pw-capture -- capture <source-id> 3
 The capture duration is clamped to 1–30 seconds. The utility reports negotiated
 format and aggregate sample statistics; it neither records audio to disk nor
 silently substitutes synthetic audio when PipeWire fails.
+
+### Local Whisper development
+
+The speech-to-text adapter uses whisper.cpp through `whisper-rs`, runs model
+inference on a dedicated worker, downsamples input to 16 kHz mono, and keeps
+both its input queue and rolling audio window bounded. Models are deliberately
+excluded from Git. Download the English tiny model locally with:
+
+```sh
+./scripts/download-whisper-model.sh
+```
+
+The downloader verifies the model's pinned SHA-256 digest before installation.
+
+Transcribe a signed 16-bit PCM or 32-bit float WAV file with the bounded
+diagnostic utility:
+
+```sh
+cargo run -p lcrt-stt-whisper --bin lcrt-whisper-transcribe -- \
+  models/ggml-tiny.en.bin path/to/audio.wav en
+```
+
+Set an explicit model path in application configuration. A missing or invalid
+model produces an actionable startup error; the application does not silently
+download models or send audio to a remote service.
