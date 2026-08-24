@@ -15,4 +15,4 @@ lcrt-core = { path = "../lcrt-core" }
 tracing = { version = "0.1.41", default-features = false, features = ["std"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-pipewire = { version = "0.10.1", features = ["v1_2_0"] }
+pipewire = { version = "0.10.1", features = ["v1_0_0"] }
