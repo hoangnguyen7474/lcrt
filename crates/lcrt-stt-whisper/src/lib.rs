@@ -4,6 +4,7 @@ mod backend;
 mod config;
 mod error;
 mod resample;
+mod transcript;
 mod window;
 
 pub use backend::WhisperTranscriber;

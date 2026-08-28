@@ -15,6 +15,8 @@ pub enum WhisperBackendError {
     AudioConversion(String),
     /// The bounded input queue could not accept more captured audio.
     InputQueueFull(usize),
+    /// A bounded producer wait expired while the input queue remained full.
+    InputQueueTimeout { capacity: usize, timeout: Duration },
     /// The worker did not start within the configured limit.
     StartupTimeout(Duration),
     /// The worker did not flush within the configured limit.
@@ -44,6 +46,10 @@ impl fmt::Display for WhisperBackendError {
             Self::InputQueueFull(capacity) => write!(
                 formatter,
                 "Whisper input queue reached its {capacity}-chunk bound; transcription cannot keep up with capture"
+            ),
+            Self::InputQueueTimeout { capacity, timeout } => write!(
+                formatter,
+                "Whisper input queue remained at its {capacity}-chunk bound for {timeout:?}; transcription cannot keep up with the producer"
             ),
             Self::StartupTimeout(timeout) => {
                 write!(formatter, "Whisper model did not load within {timeout:?}")

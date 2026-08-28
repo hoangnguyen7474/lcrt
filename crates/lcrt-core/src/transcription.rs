@@ -9,30 +9,76 @@ use crate::{AudioChunk, CaptionStatus};
 pub struct TranscriptUpdate {
     text: String,
     status: CaptionStatus,
+    stable_prefix_len: usize,
 }
 
 impl TranscriptUpdate {
     /// Creates an incremental result that may be superseded.
     pub fn partial(text: impl Into<String>) -> Result<Self, TranscriptUpdateError> {
-        Self::new(text, CaptionStatus::Partial)
+        Self::new(text, CaptionStatus::Partial, 0)
     }
 
     /// Creates a finalized result.
     pub fn finalized(text: impl Into<String>) -> Result<Self, TranscriptUpdateError> {
-        Self::new(text, CaptionStatus::Final)
+        let text = text.into();
+        let stable_prefix_len = text.len();
+        Self::new(text, CaptionStatus::Final, stable_prefix_len)
     }
 
-    fn new(text: impl Into<String>, status: CaptionStatus) -> Result<Self, TranscriptUpdateError> {
+    /// Creates a partial result with a stable prefix and replaceable tail.
+    ///
+    /// This lets rolling-window transcribers retain accepted text while still
+    /// replacing only the newest hypothesis on later inference passes.
+    pub fn incremental(
+        stable_text: impl Into<String>,
+        partial_text: impl Into<String>,
+    ) -> Result<Self, TranscriptUpdateError> {
+        let stable_text = stable_text.into();
+        let partial_text = partial_text.into();
+        if partial_text.trim().is_empty() {
+            return Err(TranscriptUpdateError::EmptyText);
+        }
+        let stable_text = stable_text.trim();
+        let partial_text = partial_text.trim();
+        let mut text = stable_text.to_owned();
+        let stable_prefix_len = text.len();
+        if !text.is_empty() {
+            text.push(' ');
+        }
+        text.push_str(partial_text);
+        Self::new(text, CaptionStatus::Partial, stable_prefix_len)
+    }
+
+    fn new(
+        text: impl Into<String>,
+        status: CaptionStatus,
+        stable_prefix_len: usize,
+    ) -> Result<Self, TranscriptUpdateError> {
         let text = text.into();
         if text.trim().is_empty() {
             return Err(TranscriptUpdateError::EmptyText);
         }
-        Ok(Self { text, status })
+        debug_assert!(text.is_char_boundary(stable_prefix_len));
+        Ok(Self {
+            text,
+            status,
+            stable_prefix_len,
+        })
     }
 
     /// Returns the update text.
     pub fn text(&self) -> &str {
         &self.text
+    }
+
+    /// Returns the accepted prefix that later partial updates must preserve.
+    pub fn stable_text(&self) -> &str {
+        &self.text[..self.stable_prefix_len]
+    }
+
+    /// Returns the replaceable tail of a partial update.
+    pub fn partial_text(&self) -> &str {
+        self.text[self.stable_prefix_len..].trim_start()
     }
 
     /// Consumes the update and returns its text.
@@ -105,5 +151,14 @@ mod tests {
             TranscriptUpdate::partial("   ").unwrap_err(),
             TranscriptUpdateError::EmptyText
         );
+    }
+
+    #[test]
+    fn incremental_update_exposes_stable_and_replaceable_text() {
+        let update = TranscriptUpdate::incremental("accepted words", "new hypothesis").unwrap();
+
+        assert_eq!(update.text(), "accepted words new hypothesis");
+        assert_eq!(update.stable_text(), "accepted words");
+        assert_eq!(update.partial_text(), "new hypothesis");
     }
 }

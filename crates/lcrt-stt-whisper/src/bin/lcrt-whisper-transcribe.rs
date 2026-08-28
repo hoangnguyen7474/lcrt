@@ -1,10 +1,11 @@
-use std::{env, error::Error, path::Path, process::ExitCode};
+use std::{env, error::Error, path::Path, process::ExitCode, time::Duration};
 
 use hound::{SampleFormat, WavReader};
 use lcrt_core::{AudioChunk, Transcriber, TranscriptUpdate};
 use lcrt_stt_whisper::{WhisperConfig, WhisperTranscriber};
 
 const CHUNK_FRAMES: usize = 4_096;
+const INPUT_BACKPRESSURE_TIMEOUT: Duration = Duration::from_secs(30);
 
 fn main() -> ExitCode {
     match run() {
@@ -37,11 +38,18 @@ fn run() -> Result<(), Box<dyn Error>> {
     config.language = language;
     let mut transcriber = WhisperTranscriber::new(config)?;
     let samples_per_chunk = CHUNK_FRAMES * usize::from(channels);
+    let mut update_count = 0_usize;
+    let mut chunk_count = 0_usize;
     for samples in samples.chunks(samples_per_chunk) {
         let chunk = AudioChunk::new(samples.to_vec(), sample_rate, channels)?;
-        print_updates(transcriber.push_audio(chunk)?);
+        update_count +=
+            print_updates(transcriber.push_audio_with_timeout(chunk, INPUT_BACKPRESSURE_TIMEOUT)?);
+        chunk_count += 1;
     }
-    print_updates(transcriber.finish()?);
+    update_count += print_updates(transcriber.finish()?);
+    eprintln!(
+        "processed {chunk_count} bounded audio chunks and emitted {update_count} transcript updates"
+    );
     Ok(())
 }
 
@@ -68,8 +76,10 @@ fn read_wav(path: &Path) -> Result<(Vec<f32>, u32, u16), Box<dyn Error>> {
     Ok((samples, spec.sample_rate, spec.channels))
 }
 
-fn print_updates(updates: Vec<TranscriptUpdate>) {
+fn print_updates(updates: Vec<TranscriptUpdate>) -> usize {
+    let count = updates.len();
     for update in updates {
         println!("{:?}: {}", update.status(), update.text());
     }
+    count
 }

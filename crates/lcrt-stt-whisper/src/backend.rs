@@ -17,6 +17,7 @@ use whisper_rs::{
 use crate::{
     WhisperBackendError, WhisperConfig,
     resample::AudioConverter,
+    transcript::TranscriptAssembler,
     window::{InferenceKind, StreamingWindow},
 };
 
@@ -130,6 +131,58 @@ impl WhisperTranscriber {
             }
         }
         Ok(updates)
+    }
+
+    /// Enqueues audio with bounded producer backpressure while draining ready
+    /// transcript events so the worker cannot deadlock on its output queue.
+    ///
+    /// Live capture should continue using [`Transcriber::push_audio`] so it
+    /// remains non-blocking. This method is intended for finite offline input.
+    pub fn push_audio_with_timeout(
+        &mut self,
+        chunk: AudioChunk,
+        timeout: Duration,
+    ) -> Result<Vec<TranscriptUpdate>, TranscriptionError> {
+        if self.finished {
+            return Err(TranscriptionError::new(
+                "Whisper transcriber received audio after it was finished",
+            ));
+        }
+        let Some(sender) = self.commands.clone() else {
+            return Err(TranscriptionError::new(
+                "Whisper worker command channel is unavailable",
+            ));
+        };
+        let mut updates = Vec::new();
+        let result = send_with_backpressure(
+            &sender,
+            WorkerCommand::Audio(chunk),
+            timeout,
+            || -> Result<(), WhisperBackendError> {
+                updates.extend(self.collect_available()?);
+                Ok(())
+            },
+        );
+        match result {
+            Ok(()) => {
+                updates.extend(
+                    self.collect_available()
+                        .map_err(|error| TranscriptionError::new(error.to_string()))?,
+                );
+                Ok(updates)
+            }
+            Err(BoundedSendError::Timeout(_)) => Err(TranscriptionError::new(
+                WhisperBackendError::InputQueueTimeout {
+                    capacity: self.input_queue_capacity,
+                    timeout,
+                }
+                .to_string(),
+            )),
+            Err(BoundedSendError::Disconnected(_)) => Err(TranscriptionError::new(
+                "Whisper worker command channel disconnected unexpectedly",
+            )),
+            Err(BoundedSendError::Wait(error)) => Err(TranscriptionError::new(error.to_string())),
+        }
     }
 
     fn join_worker(&mut self) -> Result<(), WhisperBackendError> {
@@ -281,7 +334,7 @@ fn run_worker(
         .map_err(|error| WhisperBackendError::Whisper(error.to_string()))?;
     let mut window = StreamingWindow::new(&config)?;
     let mut converter = None;
-    let mut last_partial = String::new();
+    let mut transcript = TranscriptAssembler::new(config.max_transcript_bytes);
     startup
         .send(Ok(()))
         .map_err(|_| WhisperBackendError::Worker("startup receiver disconnected".to_owned()))?;
@@ -322,7 +375,7 @@ fn run_worker(
                         &mut state,
                         &config,
                         &events,
-                        &mut last_partial,
+                        &mut transcript,
                     )?;
                     return Ok(());
                 }
@@ -333,7 +386,7 @@ fn run_worker(
                         &mut state,
                         &config,
                         &events,
-                        &mut last_partial,
+                        &mut transcript,
                     )?;
                 }
             }
@@ -344,7 +397,7 @@ fn run_worker(
                     &mut state,
                     &config,
                     &events,
-                    &mut last_partial,
+                    &mut transcript,
                 )?;
                 return Ok(());
             }
@@ -372,14 +425,14 @@ fn finish_stream(
     state: &mut WhisperState,
     config: &WhisperConfig,
     events: &SyncSender<WorkerEvent>,
-    last_partial: &mut String,
+    transcript: &mut TranscriptAssembler,
 ) -> Result<(), WhisperBackendError> {
     if let Some(converter) = converter.as_mut() {
         let tail = converter.finish()?;
         window.push(&tail);
     }
     if let Some(kind) = window.finish_kind() {
-        infer_and_publish(kind, window, state, config, events, last_partial)?;
+        infer_and_publish(kind, window, state, config, events, transcript)?;
     }
     Ok(())
 }
@@ -390,11 +443,12 @@ fn infer_and_publish(
     state: &mut WhisperState,
     config: &WhisperConfig,
     events: &SyncSender<WorkerEvent>,
-    last_partial: &mut String,
+    transcript: &mut TranscriptAssembler,
 ) -> Result<(), WhisperBackendError> {
     let started = Instant::now();
     let audio_duration_ms = window.samples().len() * 1_000 / 16_000;
     let text = transcribe_window(state, window.samples(), config)?;
+    let window_rolled = window.rolled_since_inference();
     debug!(
         ?kind,
         audio_samples = window.samples().len(),
@@ -403,29 +457,45 @@ fn infer_and_publish(
         "Whisper inference completed"
     );
     window.mark_inferred(kind);
-    if text.is_empty() {
-        if kind == InferenceKind::Final {
-            last_partial.clear();
-        }
+    let Some(update) = transcript.apply(kind, text, window_rolled)? else {
         return Ok(());
-    }
-    if kind == InferenceKind::Partial && text == *last_partial {
-        return Ok(());
-    }
-    let update = match kind {
-        InferenceKind::Partial => {
-            *last_partial = text.clone();
-            TranscriptUpdate::partial(text)
-        }
-        InferenceKind::Final => {
-            last_partial.clear();
-            TranscriptUpdate::finalized(text)
-        }
-    }
-    .map_err(|error| WhisperBackendError::Whisper(error.to_string()))?;
+    };
     events
         .send(WorkerEvent::Update(update))
         .map_err(|_| WhisperBackendError::Worker("result receiver disconnected".to_owned()))
+}
+
+enum BoundedSendError<T, E> {
+    Timeout(T),
+    Disconnected(T),
+    Wait(E),
+}
+
+fn send_with_backpressure<T, E>(
+    sender: &SyncSender<T>,
+    mut value: T,
+    timeout: Duration,
+    mut wait: impl FnMut() -> Result<(), E>,
+) -> Result<(), BoundedSendError<T, E>> {
+    let Some(deadline) = Instant::now().checked_add(timeout) else {
+        return Err(BoundedSendError::Timeout(value));
+    };
+    loop {
+        match sender.try_send(value) {
+            Ok(()) => return Ok(()),
+            Err(TrySendError::Full(returned)) => {
+                value = returned;
+                wait().map_err(BoundedSendError::Wait)?;
+                if Instant::now() >= deadline {
+                    return Err(BoundedSendError::Timeout(value));
+                }
+                thread::sleep(Duration::from_millis(1));
+            }
+            Err(TrySendError::Disconnected(returned)) => {
+                return Err(BoundedSendError::Disconnected(returned));
+            }
+        }
+    }
 }
 
 fn transcribe_window(
@@ -468,9 +538,9 @@ fn transcribe_window(
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::{path::PathBuf, sync::mpsc::sync_channel, thread, time::Duration};
 
-    use super::WhisperTranscriber;
+    use super::{BoundedSendError, WhisperTranscriber, send_with_backpressure};
     use crate::{WhisperBackendError, WhisperConfig};
 
     #[test]
@@ -487,5 +557,46 @@ mod tests {
                 "/definitely/missing/lcrt-model.bin"
             ))
         );
+    }
+
+    #[test]
+    fn bounded_send_waits_for_queue_capacity() {
+        let (sender, receiver) = sync_channel(1);
+        sender.send(1_u8).unwrap();
+        let worker = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(10));
+            assert_eq!(receiver.recv().unwrap(), 1);
+            assert_eq!(receiver.recv().unwrap(), 2);
+        });
+        let mut waits = 0;
+
+        let result = send_with_backpressure(
+            &sender,
+            2,
+            Duration::from_millis(100),
+            || -> Result<(), ()> {
+                waits += 1;
+                Ok(())
+            },
+        );
+
+        assert!(result.is_ok());
+        assert!(waits > 0);
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn bounded_send_times_out_when_queue_stays_full() {
+        let (sender, _receiver) = sync_channel(1);
+        sender.send(1_u8).unwrap();
+
+        let result = send_with_backpressure(
+            &sender,
+            2,
+            Duration::from_millis(5),
+            || -> Result<(), ()> { Ok(()) },
+        );
+
+        assert!(matches!(result, Err(BoundedSendError::Timeout(2))));
     }
 }
