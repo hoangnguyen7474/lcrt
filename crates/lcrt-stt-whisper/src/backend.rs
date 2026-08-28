@@ -1,7 +1,7 @@
 use std::{
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc::{Receiver, RecvTimeoutError, SyncSender, TryRecvError, TrySendError, sync_channel},
     },
     thread::{self, JoinHandle},
@@ -41,6 +41,7 @@ pub struct WhisperTranscriber {
     input_queue_capacity: usize,
     finish_timeout: Duration,
     finished: bool,
+    inference_count: Arc<AtomicU64>,
 }
 
 impl WhisperTranscriber {
@@ -55,6 +56,8 @@ impl WhisperTranscriber {
         let (startup_sender, startup_receiver) = sync_channel(1);
         let cancel = Arc::new(AtomicBool::new(false));
         let worker_cancel = Arc::clone(&cancel);
+        let inference_count = Arc::new(AtomicU64::new(0));
+        let worker_inference_count = Arc::clone(&inference_count);
         let worker = thread::Builder::new()
             .name("lcrt-whisper-stt".to_owned())
             .spawn(move || {
@@ -64,6 +67,7 @@ impl WhisperTranscriber {
                     event_sender.clone(),
                     startup_sender.clone(),
                     worker_cancel,
+                    worker_inference_count,
                 );
                 if let Err(error) = &result {
                     let message = error.to_string();
@@ -84,6 +88,7 @@ impl WhisperTranscriber {
                 input_queue_capacity,
                 finish_timeout,
                 finished: false,
+                inference_count,
             }),
             Ok(Err(message)) => {
                 drop(commands);
@@ -183,6 +188,11 @@ impl WhisperTranscriber {
             )),
             Err(BoundedSendError::Wait(error)) => Err(TranscriptionError::new(error.to_string())),
         }
+    }
+
+    /// Returns the number of successful local Whisper inference passes.
+    pub fn inference_count(&self) -> u64 {
+        self.inference_count.load(Ordering::Relaxed)
     }
 
     fn join_worker(&mut self) -> Result<(), WhisperBackendError> {
@@ -320,6 +330,7 @@ fn run_worker(
     events: SyncSender<WorkerEvent>,
     startup: SyncSender<Result<(), String>>,
     cancel: Arc<AtomicBool>,
+    inference_count: Arc<AtomicU64>,
 ) -> Result<(), WhisperBackendError> {
     whisper_rs::install_logging_hooks();
     let model_path = config.model_path.to_str().ok_or_else(|| {
@@ -353,7 +364,11 @@ fn run_worker(
                 // captured during the previous pass and infer once over the
                 // newest rolling window instead of repeatedly transcribing stale
                 // intermediate windows while the bounded queue grows.
-                while pending_kind != Some(InferenceKind::Final) {
+                // Preserve backlog coalescing, but never drain so far that the
+                // first pending inference loses audio beyond the retained
+                // window. Once full, inference must complete before more queued
+                // input advances the rolling context.
+                while !inference_due_before_drain(pending_kind, &window) {
                     match commands.try_recv() {
                         Ok(WorkerCommand::Audio(chunk)) => {
                             if let Some(kind) = append_chunk(chunk, &mut converter, &mut window)? {
@@ -376,6 +391,7 @@ fn run_worker(
                         &config,
                         &events,
                         &mut transcript,
+                        &inference_count,
                     )?;
                     return Ok(());
                 }
@@ -387,6 +403,7 @@ fn run_worker(
                         &config,
                         &events,
                         &mut transcript,
+                        &inference_count,
                     )?;
                 }
             }
@@ -398,6 +415,7 @@ fn run_worker(
                     &config,
                     &events,
                     &mut transcript,
+                    &inference_count,
                 )?;
                 return Ok(());
             }
@@ -426,13 +444,22 @@ fn finish_stream(
     config: &WhisperConfig,
     events: &SyncSender<WorkerEvent>,
     transcript: &mut TranscriptAssembler,
+    inference_count: &AtomicU64,
 ) -> Result<(), WhisperBackendError> {
     if let Some(converter) = converter.as_mut() {
         let tail = converter.finish()?;
         window.push(&tail);
     }
     if let Some(kind) = window.finish_kind() {
-        infer_and_publish(kind, window, state, config, events, transcript)?;
+        infer_and_publish(
+            kind,
+            window,
+            state,
+            config,
+            events,
+            transcript,
+            inference_count,
+        )?;
     }
     Ok(())
 }
@@ -444,10 +471,12 @@ fn infer_and_publish(
     config: &WhisperConfig,
     events: &SyncSender<WorkerEvent>,
     transcript: &mut TranscriptAssembler,
+    inference_count: &AtomicU64,
 ) -> Result<(), WhisperBackendError> {
     let started = Instant::now();
     let audio_duration_ms = window.samples().len() * 1_000 / 16_000;
     let text = transcribe_window(state, window.samples(), config)?;
+    inference_count.fetch_add(1, Ordering::Relaxed);
     let window_rolled = window.rolled_since_inference();
     debug!(
         ?kind,
@@ -463,6 +492,14 @@ fn infer_and_publish(
     events
         .send(WorkerEvent::Update(update))
         .map_err(|_| WhisperBackendError::Worker("result receiver disconnected".to_owned()))
+}
+
+fn inference_due_before_drain(
+    pending_kind: Option<InferenceKind>,
+    window: &StreamingWindow,
+) -> bool {
+    pending_kind == Some(InferenceKind::Final)
+        || (pending_kind == Some(InferenceKind::Partial) && window.is_at_capacity())
 }
 
 enum BoundedSendError<T, E> {
@@ -540,7 +577,10 @@ fn transcribe_window(
 mod tests {
     use std::{path::PathBuf, sync::mpsc::sync_channel, thread, time::Duration};
 
-    use super::{BoundedSendError, WhisperTranscriber, send_with_backpressure};
+    use super::{
+        BoundedSendError, WhisperTranscriber, inference_due_before_drain, send_with_backpressure,
+    };
+    use crate::window::{InferenceKind, StreamingWindow};
     use crate::{WhisperBackendError, WhisperConfig};
 
     #[test]
@@ -598,5 +638,28 @@ mod tests {
         );
 
         assert!(matches!(result, Err(BoundedSendError::Timeout(2))));
+    }
+
+    #[test]
+    fn backlog_drain_stops_before_a_pending_partial_loses_audio() {
+        let mut config = WhisperConfig::new(std::env::temp_dir().join("unused-test-model.bin"));
+        config.window_duration = Duration::from_secs(2);
+        config.partial_step = Duration::from_millis(500);
+        config.minimum_speech = Duration::from_millis(250);
+        let mut window = StreamingWindow::new(&config).unwrap();
+        let mut pending_kind = None;
+        let mut drained_chunks = 0;
+
+        while !inference_due_before_drain(pending_kind, &window) {
+            if let Some(kind) = window.push(&vec![0.1; 4_000]) {
+                pending_kind = Some(kind);
+            }
+            drained_chunks += 1;
+        }
+
+        assert_eq!(pending_kind, Some(InferenceKind::Partial));
+        assert_eq!(drained_chunks, 8);
+        assert!(window.is_at_capacity());
+        assert!(!window.rolled_since_inference());
     }
 }

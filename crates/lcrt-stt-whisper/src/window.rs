@@ -123,6 +123,10 @@ impl StreamingWindow {
         self.rolled_since_inference
     }
 
+    pub(crate) fn is_at_capacity(&self) -> bool {
+        self.samples.len() == self.max_samples
+    }
+
     pub(crate) fn mark_inferred(&mut self, kind: InferenceKind) {
         self.speech_samples_since_inference = 0;
         self.rolled_since_inference = false;

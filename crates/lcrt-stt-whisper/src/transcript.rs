@@ -35,13 +35,14 @@ impl TranscriptAssembler {
             InferenceKind::Partial if text.is_empty() => Ok(None),
             InferenceKind::Partial => {
                 let previous = self.joined();
+                let previous_stable = self.committed.clone();
                 if window_rolled {
                     self.commit_prefix_not_in(text);
                 }
                 self.partial.clear();
                 self.partial.push_str(text);
                 self.enforce_bound();
-                if self.joined() == previous {
+                if self.joined() == previous && self.committed == previous_stable {
                     return Ok(None);
                 }
                 TranscriptUpdate::incremental(&self.committed, &self.partial)
@@ -76,24 +77,17 @@ impl TranscriptAssembler {
         if prefix.is_empty() {
             return;
         }
-        if !self.committed.is_empty() {
-            self.committed.push(' ');
-        }
         self.committed.push_str(&prefix);
     }
 
     fn enforce_bound(&mut self) {
-        let separator_bytes = usize::from(!self.committed.is_empty() && !self.partial.is_empty());
-        if self.partial.len().saturating_add(separator_bytes) >= self.max_bytes {
+        if self.partial.len() >= self.max_bytes {
             self.committed.clear();
             self.partial = truncate_front(&self.partial, self.max_bytes);
             return;
         }
 
-        let committed_budget = self
-            .max_bytes
-            .saturating_sub(self.partial.len())
-            .saturating_sub(separator_bytes);
+        let committed_budget = self.max_bytes.saturating_sub(self.partial.len());
         self.committed = truncate_front(&self.committed, committed_budget);
     }
 
@@ -102,25 +96,90 @@ impl TranscriptAssembler {
             (true, true) => String::new(),
             (true, false) => self.partial.clone(),
             (false, true) => self.committed.clone(),
-            (false, false) => format!("{} {}", self.committed, self.partial),
+            (false, false) => format!("{}{}", self.committed, self.partial),
         }
     }
 }
 
 fn non_overlapping_prefix(previous: &str, current: &str) -> String {
-    let previous_words = previous.split_whitespace().collect::<Vec<_>>();
-    let current_words = current.split_whitespace().collect::<Vec<_>>();
+    if contains_unsegmented_script(previous) || contains_unsegmented_script(current) {
+        return non_overlapping_character_prefix(previous, current);
+    }
+
+    let previous_words = word_spans(previous);
+    let current_words = word_spans(current);
     let maximum = previous_words.len().min(current_words.len());
-    let overlap = (1..=maximum)
+    let word_overlap = (1..=maximum)
         .rev()
         .find(|&count| {
             previous_words[previous_words.len() - count..]
                 .iter()
                 .zip(&current_words[..count])
-                .all(|(left, right)| normalized_word(left) == normalized_word(right))
+                .all(|(left, right)| normalized_word(left.2) == normalized_word(right.2))
         })
         .unwrap_or(0);
-    previous_words[..previous_words.len() - overlap].join(" ")
+    if word_overlap > 0 {
+        let overlap_start = previous_words[previous_words.len() - word_overlap].0;
+        return previous[..overlap_start].to_owned();
+    }
+
+    if previous.is_empty() {
+        String::new()
+    } else {
+        format!("{} ", previous.trim_end())
+    }
+}
+
+fn word_spans(text: &str) -> Vec<(usize, usize, &str)> {
+    let mut words = Vec::new();
+    let mut start = None;
+    for (index, character) in text.char_indices() {
+        if character.is_whitespace() {
+            if let Some(word_start) = start.take() {
+                words.push((word_start, index, &text[word_start..index]));
+            }
+        } else if start.is_none() {
+            start = Some(index);
+        }
+    }
+    if let Some(word_start) = start {
+        words.push((word_start, text.len(), &text[word_start..]));
+    }
+    words
+}
+
+fn contains_unsegmented_script(text: &str) -> bool {
+    text.chars().any(|character| {
+        matches!(
+            character as u32,
+            0x3040..=0x30ff
+                | 0x3400..=0x4dbf
+                | 0x4e00..=0x9fff
+                | 0xac00..=0xd7af
+                | 0xf900..=0xfaff
+                | 0x20000..=0x323af
+        )
+    })
+}
+
+fn non_overlapping_character_prefix(previous: &str, current: &str) -> String {
+    let previous_characters = previous.char_indices().collect::<Vec<_>>();
+    let current_characters = current.chars().collect::<Vec<_>>();
+    let maximum = previous_characters.len().min(current_characters.len());
+    let overlap = (1..=maximum)
+        .rev()
+        .find(|&count| {
+            previous_characters[previous_characters.len() - count..]
+                .iter()
+                .map(|(_, character)| character)
+                .eq(current_characters[..count].iter())
+        })
+        .unwrap_or(0);
+    let prefix_characters = previous_characters.len() - overlap;
+    let prefix_end = previous_characters
+        .get(prefix_characters)
+        .map_or(previous.len(), |(byte_index, _)| *byte_index);
+    previous[..prefix_end].to_owned()
 }
 
 fn normalized_word(word: &str) -> String {
@@ -199,12 +258,12 @@ mod tests {
             .unwrap();
 
         assert_eq!(second.text(), "alpha beta gamma delta epsilon zeta");
-        assert_eq!(second.stable_text(), "alpha beta");
+        assert_eq!(second.stable_text(), "alpha beta ");
         assert_eq!(
             third.text(),
             "alpha beta gamma delta epsilon zeta eta theta"
         );
-        assert_eq!(third.stable_text(), "alpha beta gamma delta");
+        assert_eq!(third.stable_text(), "alpha beta gamma delta ");
     }
 
     #[test]
@@ -235,7 +294,7 @@ mod tests {
         let last = last.unwrap();
         assert_eq!(window.samples().len(), 32_000);
         assert_eq!(last.text(), "zero one two three four five");
-        assert_eq!(last.stable_text(), "zero one");
+        assert_eq!(last.stable_text(), "zero one ");
     }
 
     #[test]
@@ -256,6 +315,39 @@ mod tests {
 
         assert_eq!(final_update.text(), "keep this caption");
         assert_eq!(final_update.status(), CaptionStatus::Final);
+    }
+
+    #[test]
+    fn rolling_unsegmented_script_uses_character_overlap() {
+        let mut transcript = TranscriptAssembler::new(256);
+        transcript
+            .apply(InferenceKind::Partial, "你好世界".to_owned(), false)
+            .unwrap();
+
+        let update = transcript
+            .apply(InferenceKind::Partial, "世界和平".to_owned(), true)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(update.text(), "你好世界和平");
+        assert_eq!(update.stable_text(), "你好");
+    }
+
+    #[test]
+    fn stable_boundary_advancement_emits_unchanged_visible_text() {
+        let mut transcript = TranscriptAssembler::new(256);
+        transcript
+            .apply(InferenceKind::Partial, "alpha beta gamma".to_owned(), false)
+            .unwrap();
+
+        let update = transcript
+            .apply(InferenceKind::Partial, "beta gamma".to_owned(), true)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(update.text(), "alpha beta gamma");
+        assert_eq!(update.stable_text(), "alpha ");
+        assert_eq!(update.partial_text(), "beta gamma");
     }
 
     #[test]

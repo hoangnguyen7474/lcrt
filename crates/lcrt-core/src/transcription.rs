@@ -33,19 +33,13 @@ impl TranscriptUpdate {
         stable_text: impl Into<String>,
         partial_text: impl Into<String>,
     ) -> Result<Self, TranscriptUpdateError> {
-        let stable_text = stable_text.into();
+        let mut text = stable_text.into();
         let partial_text = partial_text.into();
         if partial_text.trim().is_empty() {
             return Err(TranscriptUpdateError::EmptyText);
         }
-        let stable_text = stable_text.trim();
-        let partial_text = partial_text.trim();
-        let mut text = stable_text.to_owned();
         let stable_prefix_len = text.len();
-        if !text.is_empty() {
-            text.push(' ');
-        }
-        text.push_str(partial_text);
+        text.push_str(&partial_text);
         Self::new(text, CaptionStatus::Partial, stable_prefix_len)
     }
 
@@ -155,10 +149,10 @@ mod tests {
 
     #[test]
     fn incremental_update_exposes_stable_and_replaceable_text() {
-        let update = TranscriptUpdate::incremental("accepted words", "new hypothesis").unwrap();
+        let update = TranscriptUpdate::incremental("accepted words ", "new hypothesis").unwrap();
 
         assert_eq!(update.text(), "accepted words new hypothesis");
-        assert_eq!(update.stable_text(), "accepted words");
+        assert_eq!(update.stable_text(), "accepted words ");
         assert_eq!(update.partial_text(), "new hypothesis");
     }
 }

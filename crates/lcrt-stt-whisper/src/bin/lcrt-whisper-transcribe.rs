@@ -5,6 +5,7 @@ use lcrt_core::{AudioChunk, Transcriber, TranscriptUpdate};
 use lcrt_stt_whisper::{WhisperConfig, WhisperTranscriber};
 
 const CHUNK_FRAMES: usize = 4_096;
+const OFFLINE_QUEUE_CAPACITY: usize = 8;
 const INPUT_BACKPRESSURE_TIMEOUT: Duration = Duration::from_secs(30);
 
 fn main() -> ExitCode {
@@ -36,6 +37,9 @@ fn run() -> Result<(), Box<dyn Error>> {
     let (samples, sample_rate, channels) = read_wav(Path::new(&wav_path))?;
     let mut config = WhisperConfig::new(model_path);
     config.language = language;
+    // Keep finite-file input close enough to completed inference that shutdown
+    // never inherits a live-capture-sized backlog.
+    config.input_queue_capacity = OFFLINE_QUEUE_CAPACITY;
     let mut transcriber = WhisperTranscriber::new(config)?;
     let samples_per_chunk = CHUNK_FRAMES * usize::from(channels);
     let mut update_count = 0_usize;
@@ -47,8 +51,9 @@ fn run() -> Result<(), Box<dyn Error>> {
         chunk_count += 1;
     }
     update_count += print_updates(transcriber.finish()?);
+    let inference_count = transcriber.inference_count();
     eprintln!(
-        "processed {chunk_count} bounded audio chunks and emitted {update_count} transcript updates"
+        "processed {chunk_count} bounded audio chunks with {inference_count} inference passes and emitted {update_count} transcript updates"
     );
     Ok(())
 }
