@@ -1,10 +1,12 @@
-use std::{env, error::Error, path::Path, process::ExitCode};
+use std::{env, error::Error, path::Path, process::ExitCode, time::Duration};
 
 use hound::{SampleFormat, WavReader};
 use lcrt_core::{AudioChunk, Transcriber, TranscriptUpdate};
 use lcrt_stt_whisper::{WhisperConfig, WhisperTranscriber};
 
 const CHUNK_FRAMES: usize = 4_096;
+const OFFLINE_QUEUE_CAPACITY: usize = 8;
+const INPUT_BACKPRESSURE_TIMEOUT: Duration = Duration::from_secs(30);
 
 fn main() -> ExitCode {
     match run() {
@@ -35,13 +37,24 @@ fn run() -> Result<(), Box<dyn Error>> {
     let (samples, sample_rate, channels) = read_wav(Path::new(&wav_path))?;
     let mut config = WhisperConfig::new(model_path);
     config.language = language;
+    // Keep finite-file input close enough to completed inference that shutdown
+    // never inherits a live-capture-sized backlog.
+    config.input_queue_capacity = OFFLINE_QUEUE_CAPACITY;
     let mut transcriber = WhisperTranscriber::new(config)?;
     let samples_per_chunk = CHUNK_FRAMES * usize::from(channels);
+    let mut update_count = 0_usize;
+    let mut chunk_count = 0_usize;
     for samples in samples.chunks(samples_per_chunk) {
         let chunk = AudioChunk::new(samples.to_vec(), sample_rate, channels)?;
-        print_updates(transcriber.push_audio(chunk)?);
+        update_count +=
+            print_updates(transcriber.push_audio_with_timeout(chunk, INPUT_BACKPRESSURE_TIMEOUT)?);
+        chunk_count += 1;
     }
-    print_updates(transcriber.finish()?);
+    update_count += print_updates(transcriber.finish()?);
+    let inference_count = transcriber.inference_count();
+    eprintln!(
+        "processed {chunk_count} bounded audio chunks with {inference_count} inference passes and emitted {update_count} transcript updates"
+    );
     Ok(())
 }
 
@@ -68,8 +81,10 @@ fn read_wav(path: &Path) -> Result<(Vec<f32>, u32, u16), Box<dyn Error>> {
     Ok((samples, spec.sample_rate, spec.channels))
 }
 
-fn print_updates(updates: Vec<TranscriptUpdate>) {
+fn print_updates(updates: Vec<TranscriptUpdate>) -> usize {
+    let count = updates.len();
     for update in updates {
         println!("{:?}: {}", update.status(), update.text());
     }
+    count
 }

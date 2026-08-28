@@ -23,6 +23,8 @@ pub struct WhisperConfig {
     pub final_silence: Duration,
     /// RMS threshold in normalized PCM units used by the lightweight energy gate.
     pub speech_rms_threshold: f32,
+    /// Maximum UTF-8 bytes retained across committed and partial transcript text.
+    pub max_transcript_bytes: usize,
     /// Maximum time allowed for model loading.
     pub startup_timeout: Duration,
     /// Maximum time allowed to flush queued audio on stop.
@@ -42,6 +44,7 @@ impl WhisperConfig {
             minimum_speech: Duration::from_millis(750),
             final_silence: Duration::from_millis(900),
             speech_rms_threshold: 0.008,
+            max_transcript_bytes: 16 * 1_024,
             startup_timeout: Duration::from_secs(30),
             finish_timeout: Duration::from_secs(30),
         }
@@ -96,6 +99,11 @@ impl WhisperConfig {
         {
             return Err(WhisperBackendError::InvalidConfiguration(
                 "speech RMS threshold must be finite and between zero and one".to_owned(),
+            ));
+        }
+        if self.max_transcript_bytes < 16 {
+            return Err(WhisperBackendError::InvalidConfiguration(
+                "maximum transcript bytes must be at least 16".to_owned(),
             ));
         }
         if self.startup_timeout.is_zero() || self.finish_timeout.is_zero() {

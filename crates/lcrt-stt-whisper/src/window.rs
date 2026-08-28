@@ -16,9 +16,11 @@ pub(crate) struct StreamingWindow {
     step_samples: usize,
     minimum_samples: usize,
     final_silence_samples: usize,
-    samples_since_inference: usize,
+    speech_samples: usize,
+    speech_samples_since_inference: usize,
     silence_samples: usize,
     heard_speech: bool,
+    rolled_since_inference: bool,
     rms_threshold_squared: f32,
 }
 
@@ -30,9 +32,11 @@ impl StreamingWindow {
             step_samples: duration_samples(config.partial_step)?,
             minimum_samples: duration_samples(config.minimum_speech)?,
             final_silence_samples: duration_samples(config.final_silence)?,
-            samples_since_inference: 0,
+            speech_samples: 0,
+            speech_samples_since_inference: 0,
             silence_samples: 0,
             heard_speech: false,
+            rolled_since_inference: false,
             rms_threshold_squared: config.speech_rms_threshold.powi(2),
         })
     }
@@ -41,10 +45,31 @@ impl StreamingWindow {
         if samples.is_empty() {
             return None;
         }
+
+        let mean_square =
+            samples.iter().map(|sample| sample * sample).sum::<f32>() / samples.len() as f32;
+        let contains_speech = mean_square >= self.rms_threshold_squared;
+
+        // Idle audio is irrelevant to both Whisper context and speech-relative
+        // inference gates. Keeping it out also prevents old silence from
+        // consuming the rolling-window budget when a new utterance starts.
+        if !self.heard_speech && !contains_speech {
+            return None;
+        }
+
+        if contains_speech && !self.heard_speech {
+            self.heard_speech = true;
+            self.speech_samples = 0;
+            self.speech_samples_since_inference = 0;
+            self.silence_samples = 0;
+            self.rolled_since_inference = false;
+        }
+
         if samples.len() >= self.max_samples {
             self.samples.clear();
             self.samples
                 .extend_from_slice(&samples[samples.len() - self.max_samples..]);
+            self.rolled_since_inference = true;
         } else {
             let overflow = self
                 .samples
@@ -53,28 +78,31 @@ impl StreamingWindow {
                 .saturating_sub(self.max_samples);
             if overflow > 0 {
                 self.samples.drain(..overflow);
+                self.rolled_since_inference = true;
             }
             self.samples.extend_from_slice(samples);
         }
-        self.samples_since_inference = self.samples_since_inference.saturating_add(samples.len());
 
-        let mean_square =
-            samples.iter().map(|sample| sample * sample).sum::<f32>() / samples.len() as f32;
-        if mean_square >= self.rms_threshold_squared {
-            self.heard_speech = true;
+        if contains_speech {
+            self.speech_samples = self.speech_samples.saturating_add(samples.len());
+            self.speech_samples_since_inference = self
+                .speech_samples_since_inference
+                .saturating_add(samples.len());
             self.silence_samples = 0;
-        } else if self.heard_speech {
+        } else {
             self.silence_samples = self.silence_samples.saturating_add(samples.len());
         }
 
-        if self.heard_speech
-            && self.samples.len() >= self.minimum_samples
-            && self.silence_samples >= self.final_silence_samples
-        {
-            Some(InferenceKind::Final)
-        } else if self.heard_speech
-            && self.samples.len() >= self.minimum_samples
-            && self.samples_since_inference >= self.step_samples
+        if self.silence_samples >= self.final_silence_samples {
+            if self.speech_samples >= self.minimum_samples {
+                return Some(InferenceKind::Final);
+            }
+            self.reset_utterance();
+            return None;
+        }
+
+        if self.speech_samples >= self.minimum_samples
+            && self.speech_samples_since_inference >= self.step_samples
         {
             Some(InferenceKind::Partial)
         } else {
@@ -83,7 +111,7 @@ impl StreamingWindow {
     }
 
     pub(crate) fn finish_kind(&self) -> Option<InferenceKind> {
-        (self.heard_speech && self.samples.len() >= self.minimum_samples)
+        (self.heard_speech && self.speech_samples >= self.minimum_samples)
             .then_some(InferenceKind::Final)
     }
 
@@ -91,13 +119,29 @@ impl StreamingWindow {
         &self.samples
     }
 
+    pub(crate) fn rolled_since_inference(&self) -> bool {
+        self.rolled_since_inference
+    }
+
+    pub(crate) fn is_at_capacity(&self) -> bool {
+        self.samples.len() == self.max_samples
+    }
+
     pub(crate) fn mark_inferred(&mut self, kind: InferenceKind) {
-        self.samples_since_inference = 0;
+        self.speech_samples_since_inference = 0;
+        self.rolled_since_inference = false;
         if kind == InferenceKind::Final {
-            self.samples.clear();
-            self.silence_samples = 0;
-            self.heard_speech = false;
+            self.reset_utterance();
         }
+    }
+
+    fn reset_utterance(&mut self) {
+        self.samples.clear();
+        self.speech_samples = 0;
+        self.speech_samples_since_inference = 0;
+        self.silence_samples = 0;
+        self.heard_speech = false;
+        self.rolled_since_inference = false;
     }
 }
 
@@ -146,5 +190,26 @@ mod tests {
         window.push(&vec![0.1; 48_000]);
 
         assert_eq!(window.samples().len(), 32_000);
+    }
+
+    #[test]
+    fn leading_silence_does_not_satisfy_speech_or_step_gates() {
+        let mut window = StreamingWindow::new(&test_config()).unwrap();
+
+        assert_eq!(window.push(&vec![0.0; 32_000]), None);
+        assert!(window.samples().is_empty());
+        assert_eq!(window.push(&vec![0.1; 4_000]), None);
+        assert_eq!(window.push(&vec![0.0; 1_600]), None);
+        assert_eq!(window.push(&vec![0.1; 4_000]), Some(InferenceKind::Partial));
+    }
+
+    #[test]
+    fn short_speech_is_discarded_after_final_silence() {
+        let mut window = StreamingWindow::new(&test_config()).unwrap();
+
+        assert_eq!(window.push(&vec![0.1; 1_600]), None);
+        assert_eq!(window.push(&vec![0.0; 4_800]), None);
+        assert!(window.samples().is_empty());
+        assert_eq!(window.finish_kind(), None);
     }
 }
