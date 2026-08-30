@@ -3,7 +3,9 @@ use std::{env, process::ExitCode, sync::mpsc::sync_channel, thread, time::Durati
 use lcrt_core::{
     AudioSourceDescriptor, AudioSourceKind, CaptionSink, CaptionState, TranscriptUpdate,
 };
-use lcrt_ui_gtk::{CaptionUiAction, CaptionUiOptions, GtkCaptionSink, run_caption_ui};
+use lcrt_ui_gtk::{
+    CaptionUiAction, CaptionUiMode, CaptionUiOptions, GtkCaptionSink, run_caption_ui,
+};
 
 fn main() -> ExitCode {
     let smoke_test = env::args()
@@ -24,6 +26,11 @@ fn main() -> ExitCode {
     };
 
     let options = CaptionUiOptions {
+        mode: if smoke_test {
+            CaptionUiMode::Diagnostic
+        } else {
+            CaptionUiMode::Normal
+        },
         sources: vec![AudioSourceDescriptor::new(
             "demo",
             "Deterministic demo",
@@ -62,6 +69,7 @@ fn spawn_demo_controller(
                 CaptionUiAction::Stop => {
                     let _ = sink.set_running(false);
                 }
+                CaptionUiAction::Shutdown => break,
             }
         }
     })
@@ -98,13 +106,14 @@ fn publish_demo(
         if caption_sink.publish(snapshot).is_err() {
             break;
         }
-        let stopped =
-            actions.is_some_and(|actions| match actions.recv_timeout(interval) {
-                Ok(CaptionUiAction::Stop)
-                | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => true,
-                Ok(CaptionUiAction::Start { .. })
-                | Err(std::sync::mpsc::RecvTimeoutError::Timeout) => false,
-            });
+        let stopped = actions.is_some_and(|actions| match actions.recv_timeout(interval) {
+            Ok(CaptionUiAction::Stop)
+            | Ok(CaptionUiAction::Shutdown)
+            | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => true,
+            Ok(CaptionUiAction::Start { .. }) | Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                false
+            }
+        });
         if stopped {
             break;
         }

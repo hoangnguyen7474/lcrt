@@ -4,4 +4,4 @@ mod bridge;
 mod window;
 
 pub use bridge::{CaptionUiAction, GtkCaptionSink, UiEvent};
-pub use window::{CaptionUiOptions, run_caption_ui};
+pub use window::{CaptionUiMode, CaptionUiOptions, run_caption_ui};
