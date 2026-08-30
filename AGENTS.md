@@ -133,8 +133,9 @@ Use Rust formatting and linting.
 Before proposing a PR, run all relevant available checks, including:
 
 - cargo fmt --all -- --check
-- cargo clippy --workspace --all-targets --all-features -- -D warnings
-- cargo test --workspace --all-features
+- cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+- cargo test --locked --workspace --all-features
+- RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --all-features --no-deps
 
 Do not claim hardware-specific behavior has been verified unless it was
 actually tested on that hardware/environment.

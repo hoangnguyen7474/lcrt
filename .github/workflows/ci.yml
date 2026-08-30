@@ -79,7 +79,7 @@ jobs:
           if [ -n "$base_sha" ] && ! printf '%s' "$base_sha" | grep -Eq '^0+$'; then
             git diff --check "$base_sha" "$HEAD_SHA"
           else
-            git diff-tree --check --root -r "$HEAD_SHA"
+            git diff --check "$(git hash-object -t tree /dev/null)" "$HEAD_SHA"
           fi
 
       - name: Verify repository baseline
