@@ -11,13 +11,7 @@ fn main() -> ExitCode {
     let smoke_test = env::args()
         .skip(1)
         .any(|argument| argument == "--smoke-test");
-    let (sink, events) = match GtkCaptionSink::channel(32) {
-        Ok(channel) => channel,
-        Err(error) => {
-            eprintln!("error: {error}");
-            return ExitCode::FAILURE;
-        }
-    };
+    let (sink, events) = GtkCaptionSink::bridge();
     let (actions, action_receiver) = sync_channel(4);
     let controller = if smoke_test {
         spawn_smoke_controller(sink)
@@ -52,7 +46,9 @@ fn spawn_smoke_controller(sink: GtkCaptionSink) -> thread::JoinHandle<()> {
         thread::sleep(Duration::from_millis(250));
         publish_demo(&sink, Duration::from_millis(250), None);
         thread::sleep(Duration::from_millis(400));
-        let _ = sink.quit();
+        if let Err(error) = sink.quit() {
+            eprintln!("error: {error}");
+        }
     })
 }
 
@@ -67,7 +63,9 @@ fn spawn_demo_controller(
                     publish_demo(&sink, Duration::from_millis(450), Some(&actions));
                 }
                 CaptionUiAction::Stop => {
-                    let _ = sink.set_running(false);
+                    if sink.set_running(false).is_err() {
+                        break;
+                    }
                 }
                 CaptionUiAction::Shutdown => break,
             }
@@ -80,8 +78,9 @@ fn publish_demo(
     interval: Duration,
     actions: Option<&std::sync::mpsc::Receiver<CaptionUiAction>>,
 ) {
-    let _ = sink.clear_error();
-    let _ = sink.set_running(true);
+    if sink.clear_error().is_err() || sink.set_running(true).is_err() {
+        return;
+    }
     let mut state = CaptionState::new();
     let updates = [
         ("Native captions", false),
@@ -95,12 +94,19 @@ fn publish_demo(
             TranscriptUpdate::partial(text)
         };
         let Ok(update) = update else {
-            let _ = sink.show_error("Demo caption was invalid.");
-            break;
+            if sink.show_error("Demo caption was invalid.").is_err() {
+                return;
+            }
+            return;
         };
         let Ok(snapshot) = state.apply(update) else {
-            let _ = sink.show_error("Caption state could not be updated.");
-            break;
+            if sink
+                .show_error("Caption state could not be updated.")
+                .is_err()
+            {
+                return;
+            }
+            return;
         };
         let mut caption_sink = sink.clone();
         if caption_sink.publish(snapshot).is_err() {
@@ -121,5 +127,7 @@ fn publish_demo(
             thread::sleep(interval);
         }
     }
-    let _ = sink.set_running(false);
+    if let Err(error) = sink.set_running(false) {
+        eprintln!("error: {error}");
+    }
 }

@@ -1,7 +1,7 @@
 use std::{
     cell::{Cell, RefCell},
     rc::Rc,
-    sync::mpsc::{Receiver, SyncSender, TryRecvError, TrySendError},
+    sync::mpsc::{SyncSender, TrySendError},
     thread,
     time::Duration,
 };
@@ -12,7 +12,7 @@ use lcrt_core::{AudioSourceDescriptor, AudioSourceKind};
 use libadwaita as adw;
 use tracing::{debug, info};
 
-use crate::{CaptionUiAction, UiEvent};
+use crate::{CaptionUiAction, GtkCaptionReceiver};
 
 const NORMAL_APPLICATION_ID: &str = "io.github.hoangnguyen7474.Lcrt";
 const DIAGNOSTIC_APPLICATION_ID: &str = "io.github.hoangnguyen7474.Lcrt.Diagnostic";
@@ -76,9 +76,9 @@ impl Default for CaptionUiOptions {
     }
 }
 
-/// Runs the GTK main loop until the user closes the window or sends [`UiEvent::Quit`].
+/// Runs the GTK main loop until the user closes the window or the bridge requests exit.
 pub fn run_caption_ui(
-    events: Receiver<UiEvent>,
+    events: GtkCaptionReceiver,
     actions: std::sync::mpsc::SyncSender<CaptionUiAction>,
     options: CaptionUiOptions,
 ) -> glib::ExitCode {
@@ -102,7 +102,7 @@ pub fn run_caption_ui(
 
 fn build_window(
     application: &adw::Application,
-    events: Receiver<UiEvent>,
+    events: GtkCaptionReceiver,
     actions: std::sync::mpsc::SyncSender<CaptionUiAction>,
     options: &CaptionUiOptions,
 ) {
@@ -295,62 +295,62 @@ fn build_window(
     let poll_source = Rc::new(RefCell::new(None));
     let event_poll_source = Rc::clone(&poll_source);
     let source = glib::timeout_add_local(EVENT_POLL_INTERVAL, move || {
-        loop {
-            let event = match events.try_recv() {
-                Ok(event) => event,
-                Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => {
-                    error_label.set_text("Caption controller stopped unexpectedly.");
-                    error_revealer.set_reveal_child(true);
-                    running.set(false);
-                    start_stop.set_label("Start");
-                    if let Some(application) = weak_application.upgrade() {
-                        application.quit();
-                    }
-                    return glib::ControlFlow::Break;
+        let update = match events.take_update() {
+            Ok(update) => update,
+            Err(error) => {
+                error_label.set_text(&format!("Caption UI bridge failed: {error}"));
+                error_revealer.set_reveal_child(true);
+                running.set(false);
+                start_stop.set_label("Start");
+                if let Some(application) = weak_application.upgrade() {
+                    application.quit();
                 }
-            };
-            match event {
-                UiEvent::Caption(snapshot) => {
-                    debug!(
-                        revision = snapshot.revision(),
-                        ui_queue_us = snapshot.age().as_micros(),
-                        "caption update reached GTK"
-                    );
-                    caption.set_text(snapshot.caption().text());
-                    caption_status.set_text(match snapshot.caption().status() {
-                        lcrt_core::CaptionStatus::Partial => "Listening…",
-                        lcrt_core::CaptionStatus::Final => "Final",
-                    });
-                }
-                UiEvent::Running(is_running) => {
-                    running.set(is_running);
-                    source_picker.set_sensitive(!is_running && !sources.is_empty());
-                    start_stop.set_label(if is_running { "Stop" } else { "Start" });
-                    if is_running {
-                        start_stop.remove_css_class("suggested-action");
-                        start_stop.add_css_class("destructive-action");
-                        caption_status.set_text("Listening…");
-                    } else {
-                        start_stop.remove_css_class("destructive-action");
-                        start_stop.add_css_class("suggested-action");
-                        caption_status.set_text("Stopped");
-                    }
-                }
-                UiEvent::Status(status) => caption_status.set_text(&status),
-                UiEvent::Error(message) => {
-                    error_label.set_text(&message);
-                    error_revealer.set_reveal_child(true);
-                }
-                UiEvent::ClearError => error_revealer.set_reveal_child(false),
-                UiEvent::Quit => {
-                    event_poll_source.borrow_mut().take();
-                    if let Some(application) = weak_application.upgrade() {
-                        application.quit();
-                    }
-                    return glib::ControlFlow::Break;
-                }
+                return glib::ControlFlow::Break;
             }
+        };
+        if let Some(snapshot) = update.caption {
+            debug!(
+                revision = snapshot.revision(),
+                ui_state_age_us = snapshot.age().as_micros(),
+                "caption update reached GTK"
+            );
+            caption.set_text(snapshot.caption().text());
+            caption_status.set_text(match snapshot.caption().status() {
+                lcrt_core::CaptionStatus::Partial => "Listening…",
+                lcrt_core::CaptionStatus::Final => "Final",
+            });
+        }
+        if let Some(is_running) = update.running {
+            running.set(is_running);
+            source_picker.set_sensitive(!is_running && !sources.is_empty());
+            start_stop.set_label(if is_running { "Stop" } else { "Start" });
+            if is_running {
+                start_stop.remove_css_class("suggested-action");
+                start_stop.add_css_class("destructive-action");
+                caption_status.set_text("Listening…");
+            } else {
+                start_stop.remove_css_class("destructive-action");
+                start_stop.add_css_class("suggested-action");
+                caption_status.set_text("Stopped");
+            }
+        }
+        if let Some(status) = update.status {
+            caption_status.set_text(&status);
+        }
+        if let Some(error) = update.error {
+            if let Some(message) = error {
+                error_label.set_text(&message);
+                error_revealer.set_reveal_child(true);
+            } else {
+                error_revealer.set_reveal_child(false);
+            }
+        }
+        if update.quit {
+            event_poll_source.borrow_mut().take();
+            if let Some(application) = weak_application.upgrade() {
+                application.quit();
+            }
+            return glib::ControlFlow::Break;
         }
         glib::ControlFlow::Continue
     });

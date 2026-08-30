@@ -13,17 +13,18 @@ use std::{
 };
 
 use lcrt_audio_pipewire::{PipeWireCapture, PipeWireCaptureConfig, enumerate_audio_sources};
-use lcrt_core::{AudioSourceDescriptor, CaptionPipeline, RunSummary, RuntimeConfig};
+use lcrt_core::{
+    AudioSourceDescriptor, CaptionPipeline, CaptionSinkError, RunSummary, RuntimeConfig,
+};
 use lcrt_stt_whisper::{WhisperConfig, WhisperTranscriber};
 use lcrt_ui_gtk::{
     CaptionUiAction, CaptionUiMode, CaptionUiOptions, GtkCaptionSink, run_caption_ui,
 };
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 const SOURCE_ENUMERATION_TIMEOUT: Duration = Duration::from_secs(3);
 const CONTROLLER_POLL_INTERVAL: Duration = Duration::from_millis(50);
-const UI_EVENT_CAPACITY: usize = 64;
 const UI_ACTION_CAPACITY: usize = 8;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -124,13 +125,7 @@ fn run_application(
     sources: Vec<AudioSourceDescriptor>,
     startup_error: Option<String>,
 ) -> ExitCode {
-    let (sink, events) = match GtkCaptionSink::channel(UI_EVENT_CAPACITY) {
-        Ok(channel) => channel,
-        Err(error) => {
-            eprintln!("error: {error}");
-            return ExitCode::FAILURE;
-        }
-    };
+    let (sink, events) = GtkCaptionSink::bridge();
     let mut initial_errors = Vec::new();
     if let Some(error) = startup_error {
         initial_errors.push(error);
@@ -142,7 +137,7 @@ fn run_application(
         );
     }
     if !initial_errors.is_empty() {
-        let _ = sink.show_error(initial_errors.join("\n"));
+        notify_ui(sink.show_error(initial_errors.join("\n")));
     }
 
     let (actions, action_receiver) = sync_channel(UI_ACTION_CAPACITY);
@@ -162,7 +157,7 @@ fn run_application(
     let controller = match controller {
         Ok(controller) => controller,
         Err(error) => {
-            let _ = sink.show_error(format!("Could not start the caption controller: {error}"));
+            notify_ui(sink.show_error(format!("Could not start the caption controller: {error}")));
             return ExitCode::FAILURE;
         }
     };
@@ -196,7 +191,7 @@ fn run_controller(
             let smoke_succeeded = completed.is_ok();
             publish_completion(&sink, completed);
             if config.smoke.is_some() {
-                let _ = sink.quit();
+                notify_ui(sink.quit());
                 return if smoke_succeeded {
                     ControllerOutcome::SmokeSucceeded
                 } else {
@@ -208,7 +203,7 @@ fn run_controller(
         match actions.recv_timeout(CONTROLLER_POLL_INTERVAL) {
             Ok(CaptionUiAction::Start { source_id }) => {
                 if !matches!(state, ControllerState::Idle) {
-                    let _ = sink.show_error("Captioning is already running.");
+                    notify_ui(sink.show_error("Captioning is already running."));
                     continue;
                 }
                 let Some(source) = sources
@@ -216,34 +211,36 @@ fn run_controller(
                     .find(|source| source.id() == source_id)
                     .cloned()
                 else {
-                    let _ = sink.show_error("The selected PipeWire source is no longer available.");
+                    notify_ui(
+                        sink.show_error("The selected PipeWire source is no longer available."),
+                    );
                     if config.smoke.is_some() {
-                        let _ = sink.quit();
+                        notify_ui(sink.quit());
                         return ControllerOutcome::SmokeFailed;
                     }
                     continue;
                 };
                 let Some(model_path) = config.model_path.clone() else {
-                    let _ = sink.show_error(
+                    notify_ui(sink.show_error(
                         "No local Whisper model is configured. Pass --model PATH or set LCRT_MODEL_PATH.",
-                    );
+                    ));
                     if config.smoke.is_some() {
-                        let _ = sink.quit();
+                        notify_ui(sink.quit());
                         return ControllerOutcome::SmokeFailed;
                     }
                     continue;
                 };
-                let _ = sink.clear_error();
-                let _ = sink.set_running(true);
-                let _ = sink.set_status("Loading model…");
+                notify_ui(sink.clear_error());
+                notify_ui(sink.set_running(true));
+                notify_ui(sink.set_status("Loading model…"));
                 match start_pipeline(source, model_path, config.language.clone(), sink.clone()) {
                     Ok(started) => state = ControllerState::Active(started),
                     Err(message) => {
-                        let _ = sink.set_running(false);
-                        let _ = sink.set_status("Error");
-                        let _ = sink.show_error(message);
+                        notify_ui(sink.set_running(false));
+                        notify_ui(sink.set_status("Error"));
+                        notify_ui(sink.show_error(message));
                         if config.smoke.is_some() {
-                            let _ = sink.quit();
+                            notify_ui(sink.quit());
                             return ControllerOutcome::SmokeFailed;
                         }
                     }
@@ -252,7 +249,7 @@ fn run_controller(
             Ok(CaptionUiAction::Stop) => {
                 if let ControllerState::Active(session) = &state {
                     session.cancelled.store(true, Ordering::Release);
-                    let _ = sink.set_status("Stopping…");
+                    notify_ui(sink.set_status("Stopping…"));
                 }
             }
             Ok(CaptionUiAction::Shutdown) => {
@@ -364,7 +361,7 @@ fn application_exit_status(
 }
 
 fn publish_completion(sink: &GtkCaptionSink, result: Result<RunSummary, String>) {
-    let _ = sink.set_running(false);
+    notify_ui(sink.set_running(false));
     match result {
         Ok(summary) => {
             info!(
@@ -372,16 +369,24 @@ fn publish_completion(sink: &GtkCaptionSink, result: Result<RunSummary, String>)
                 caption_updates = summary.caption_updates,
                 "caption session completed"
             );
-            let _ = sink.set_status(format!(
+            notify_ui(sink.set_status(format!(
                 "Stopped · {} chunks · {} captions",
                 summary.audio_chunks, summary.caption_updates
-            ));
+            )));
         }
         Err(message) => {
             error!(%message, "caption session failed");
-            let _ = sink.set_status("Error");
-            let _ = sink.show_error(message);
+            notify_ui(sink.set_status("Error"));
+            notify_ui(sink.show_error(message));
         }
+    }
+}
+
+fn notify_ui(result: Result<(), CaptionSinkError>) {
+    if let Err(error) = result {
+        // While the GTK receiver is live, the state bridge cannot reject an
+        // update for ordinary UI lag. A failure therefore means it has ended.
+        warn!(%error, "GTK caption UI is no longer available");
     }
 }
 
