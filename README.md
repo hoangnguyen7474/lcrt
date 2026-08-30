@@ -16,19 +16,23 @@ Planned milestones:
 
 ## Development
 
-The Rust workspace uses the stable toolchain with the `rustfmt` and `clippy`
-components. Run the local quality gates with:
+The checked-in `rust-toolchain.toml` pins the primary development and CI
+toolchain to Rust 1.98.0 with the `rustfmt` and `clippy` components. This is
+separate from the workspace's declared Rust 1.85 MSRV in `Cargo.toml`.
+
+Run the same local quality gates as CI with:
 
 ```sh
 cargo fmt --all -- --check
-cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --workspace --all-features
+cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+cargo test --locked --workspace --all-features
+RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --all-features --no-deps
 ```
 
 ## Run live captions on Ubuntu
 
-Use a stable Rust toolchain on a PipeWire-based desktop and install the native
-development prerequisites on Ubuntu 24.04 or newer:
+Use the repository-pinned Rust toolchain on a PipeWire-based desktop and
+install the native development prerequisites on Ubuntu 24.04 or newer:
 
 ```sh
 sudo apt install build-essential clang cmake libadwaita-1-dev libgtk-4-dev \

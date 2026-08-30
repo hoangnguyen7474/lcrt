@@ -35,15 +35,16 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: Install Rust target
+      - name: Install repository Rust toolchain and target
         shell: bash
         run: |
           set -euo pipefail
 
-          rustup toolchain install stable --profile minimal
-          rustup target add --toolchain stable "${{ matrix.target }}"
-          rustup default stable
+          rustup toolchain install 1.98.0 --profile minimal
+          rustup target add --toolchain 1.98.0 "${{ matrix.target }}"
 
       - name: Compile-check portable core
         run: cargo check --locked -p lcrt-core --target "${{ matrix.target }}"
@@ -56,6 +57,30 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check changed files for whitespace errors
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            base_sha="$PR_BASE_SHA"
+          else
+            base_sha="$PUSH_BEFORE_SHA"
+          fi
+
+          if [ -n "$base_sha" ] && ! printf '%s' "$base_sha" | grep -Eq '^0+$'; then
+            git diff --check "$base_sha" "$HEAD_SHA"
+          else
+            git diff --check "$(git hash-object -t tree /dev/null)" "$HEAD_SHA"
+          fi
 
       - name: Verify repository baseline
         shell: bash
@@ -87,18 +112,16 @@ jobs:
       - name: Install pinned GTK4 layer-shell library
         run: scripts/install-gtk4-layer-shell.sh
 
-      - name: Install Rust toolchain
+      - name: Install repository Rust toolchain
         if: ${{ hashFiles('Cargo.toml') != '' }}
         shell: bash
         run: |
           set -euo pipefail
 
-          rustup toolchain install stable \
+          rustup toolchain install 1.98.0 \
             --profile minimal \
             --component rustfmt \
             --component clippy
-
-          rustup default stable
 
       - name: Check Rust formatting
         if: ${{ hashFiles('Cargo.toml') != '' }}
@@ -106,11 +129,15 @@ jobs:
 
       - name: Run Clippy
         if: ${{ hashFiles('Cargo.toml') != '' }}
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 
       - name: Run Rust tests
         if: ${{ hashFiles('Cargo.toml') != '' }}
-        run: cargo test --workspace --all-features
+        run: cargo test --locked --workspace --all-features
+
+      - name: Build documentation without warnings
+        if: ${{ hashFiles('Cargo.toml') != '' }}
+        run: RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --all-features --no-deps
 
       - name: Bootstrap status
         if: ${{ hashFiles('Cargo.toml') == '' }}
