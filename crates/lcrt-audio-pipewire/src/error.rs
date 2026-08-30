@@ -7,6 +7,14 @@ pub enum PipeWireError {
     InvalidConfiguration(&'static str),
     /// PipeWire rejected setup or a server operation.
     PipeWire(String),
+    /// The specifically selected source is no longer available.
+    SelectedSourceUnavailable,
+    /// PipeWire negotiated an audio format this adapter cannot safely consume.
+    InvalidNegotiatedFormat(String),
+    /// PipeWire supplied an invalid or unsupported mapped audio buffer.
+    MalformedBuffer(String),
+    /// A running PipeWire stream entered a terminal error state.
+    StreamFailure(String),
     /// Source enumeration did not complete within the caller's bound.
     EnumerationTimeout(Duration),
     /// Capture did not reach a streaming state within the caller's bound.
@@ -27,6 +35,18 @@ impl fmt::Display for PipeWireError {
                 )
             }
             Self::PipeWire(message) => write!(formatter, "PipeWire operation failed: {message}"),
+            Self::SelectedSourceUnavailable => formatter.write_str(
+                "the selected PipeWire audio source disconnected or is unavailable; select another source to continue",
+            ),
+            Self::InvalidNegotiatedFormat(message) => {
+                write!(formatter, "PipeWire negotiated an unsupported audio format: {message}")
+            }
+            Self::MalformedBuffer(message) => {
+                write!(formatter, "PipeWire supplied a malformed audio buffer: {message}")
+            }
+            Self::StreamFailure(message) => {
+                write!(formatter, "PipeWire capture stream failed: {message}")
+            }
             Self::EnumerationTimeout(timeout) => write!(
                 formatter,
                 "PipeWire source enumeration did not finish within {timeout:?}"
