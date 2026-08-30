@@ -82,8 +82,11 @@ LCRT cannot enforce always-on-top there.
 
 Current limitations: the tiny model is CPU-only and English-focused; source
 discovery occurs at launch; and responsiveness depends on model, CPU, language,
-and audio conditions. The bounded smoke option is intended for diagnostics,
-not normal use.
+and audio conditions. Closing the window requests pipeline cancellation and
+does not wait for a worker join, so a worker permanently blocked in native model
+or inference code cannot be force-terminated safely; it also cannot delay GTK
+or normal process termination. The bounded smoke option is intended for
+diagnostics, not normal use.
 
 ### Linux audio development
 

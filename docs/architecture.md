@@ -54,3 +54,14 @@ keyboard focus. Explicit width and height controls preserve resizing for layer
 surfaces, which have no compositor resize handles. Other compositors retain the
 same translucent GTK presentation as a normal window and surface that
 limitation to the user instead of claiming always-on-top behavior.
+
+## Deferred lifecycle work
+
+The application controller cancels an active pipeline and detaches its worker
+when the window closes, so UI closure never waits on native inference. A worker
+permanently blocked in model loading or inference cannot be force-terminated
+safely; cancellable model loading is a later STT lifecycle milestone.
+
+Also deferred: UI-event coalescing and control-event transport redesign,
+PipeWire source refresh, capture-error final transcript flushing, V2
+translation, and packaging.

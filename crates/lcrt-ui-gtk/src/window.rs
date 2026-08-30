@@ -1,7 +1,8 @@
 use std::{
-    cell::Cell,
+    cell::{Cell, RefCell},
     rc::Rc,
-    sync::mpsc::{Receiver, TryRecvError},
+    sync::mpsc::{Receiver, SyncSender, TryRecvError, TrySendError},
+    thread,
     time::Duration,
 };
 
@@ -13,7 +14,8 @@ use tracing::{debug, info};
 
 use crate::{CaptionUiAction, UiEvent};
 
-const APPLICATION_ID: &str = "io.github.hoangnguyen7474.Lcrt";
+const NORMAL_APPLICATION_ID: &str = "io.github.hoangnguyen7474.Lcrt";
+const DIAGNOSTIC_APPLICATION_ID: &str = "io.github.hoangnguyen7474.Lcrt.Diagnostic";
 const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(16);
 const MINIMUM_BACKGROUND_OPACITY: f64 = 0.3;
 const OVERLAY_BOTTOM_MARGIN: i32 = 36;
@@ -26,6 +28,8 @@ const ON_DEMAND_KEYBOARD_PROTOCOL_VERSION: u32 = 4;
 /// Initial native-window presentation settings.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CaptionUiOptions {
+    /// Whether the window belongs to the normal application or a diagnostic run.
+    pub mode: CaptionUiMode,
     /// Initial window width in logical pixels.
     pub width: i32,
     /// Initial window height in logical pixels.
@@ -40,9 +44,28 @@ pub struct CaptionUiOptions {
     pub sources: Vec<AudioSourceDescriptor>,
 }
 
+/// GTK application identity for the current process.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CaptionUiMode {
+    /// The normal interactive LCRT application.
+    Normal,
+    /// A bounded diagnostic run that must not activate a normal LCRT process.
+    Diagnostic,
+}
+
+impl CaptionUiMode {
+    fn application_id(self) -> &'static str {
+        match self {
+            Self::Normal => NORMAL_APPLICATION_ID,
+            Self::Diagnostic => DIAGNOSTIC_APPLICATION_ID,
+        }
+    }
+}
+
 impl Default for CaptionUiOptions {
     fn default() -> Self {
         Self {
+            mode: CaptionUiMode::Normal,
             width: 760,
             height: 320,
             font_size_points: 32.0,
@@ -59,8 +82,9 @@ pub fn run_caption_ui(
     actions: std::sync::mpsc::SyncSender<CaptionUiAction>,
     options: CaptionUiOptions,
 ) -> glib::ExitCode {
+    let application_id = options.mode.application_id();
     let application = adw::Application::builder()
-        .application_id(APPLICATION_ID)
+        .application_id(application_id)
         .build();
     let events = Rc::new(std::cell::RefCell::new(Some(events)));
     application.connect_activate(move |application| {
@@ -73,7 +97,7 @@ pub fn run_caption_ui(
         };
         build_window(application, events, actions.clone(), &options);
     });
-    application.run_with_args(&[APPLICATION_ID])
+    application.run_with_args(&[application_id])
 }
 
 fn build_window(
@@ -137,6 +161,7 @@ fn build_window(
     let action_running = Rc::clone(&running);
     let action_sources = Rc::clone(&sources);
     let action_source_picker = source_picker.clone();
+    let button_actions = actions.clone();
     start_stop.connect_clicked(move |_| {
         let action = if action_running.get() {
             CaptionUiAction::Stop
@@ -155,7 +180,7 @@ fn build_window(
                 source_id: source.id().to_owned(),
             }
         };
-        if actions.try_send(action).is_err() {
+        if button_actions.try_send(action).is_err() {
             action_error.set_text("Caption controller is busy or unavailable.");
             action_revealer.set_reveal_child(true);
         }
@@ -267,7 +292,9 @@ fn build_window(
     window.present();
 
     let weak_application = application.downgrade();
-    glib::timeout_add_local(EVENT_POLL_INTERVAL, move || {
+    let poll_source = Rc::new(RefCell::new(None));
+    let event_poll_source = Rc::clone(&poll_source);
+    let source = glib::timeout_add_local(EVENT_POLL_INTERVAL, move || {
         loop {
             let event = match events.try_recv() {
                 Ok(event) => event,
@@ -277,6 +304,9 @@ fn build_window(
                     error_revealer.set_reveal_child(true);
                     running.set(false);
                     start_stop.set_label("Start");
+                    if let Some(application) = weak_application.upgrade() {
+                        application.quit();
+                    }
                     return glib::ControlFlow::Break;
                 }
             };
@@ -314,6 +344,7 @@ fn build_window(
                 }
                 UiEvent::ClearError => error_revealer.set_reveal_child(false),
                 UiEvent::Quit => {
+                    event_poll_source.borrow_mut().take();
                     if let Some(application) = weak_application.upgrade() {
                         application.quit();
                     }
@@ -323,6 +354,27 @@ fn build_window(
         }
         glib::ControlFlow::Continue
     });
+    *poll_source.borrow_mut() = Some(source);
+
+    let close_actions = actions.clone();
+    window.connect_close_request(move |_| {
+        request_controller_shutdown(close_actions.clone());
+        if let Some(source) = poll_source.borrow_mut().take() {
+            source.remove();
+        }
+        glib::Propagation::Proceed
+    });
+}
+
+fn request_controller_shutdown(actions: SyncSender<CaptionUiAction>) {
+    match actions.try_send(CaptionUiAction::Shutdown) {
+        Ok(()) | Err(TrySendError::Disconnected(_)) => {}
+        Err(TrySendError::Full(action)) => {
+            thread::spawn(move || {
+                let _ = actions.send(action);
+            });
+        }
+    }
 }
 
 fn set_caption_font(label: &gtk::Label, points: f64) {
@@ -421,8 +473,8 @@ fn load_css(provider: &gtk::CssProvider, opacity: f64) {
 #[cfg(test)]
 mod tests {
     use super::{
-        CaptionUiOptions, MINIMUM_BACKGROUND_OPACITY, clamp_background_opacity,
-        overlay_protocol_is_usable,
+        CaptionUiMode, CaptionUiOptions, DIAGNOSTIC_APPLICATION_ID, MINIMUM_BACKGROUND_OPACITY,
+        NORMAL_APPLICATION_ID, clamp_background_opacity, overlay_protocol_is_usable,
     };
 
     #[test]
@@ -450,5 +502,17 @@ mod tests {
         assert!(!overlay_protocol_is_usable(true, true, 3));
         assert!(!overlay_protocol_is_usable(true, false, 4));
         assert!(!overlay_protocol_is_usable(false, true, 4));
+    }
+
+    #[test]
+    fn diagnostics_use_a_distinct_application_identity() {
+        assert_eq!(
+            CaptionUiMode::Normal.application_id(),
+            NORMAL_APPLICATION_ID
+        );
+        assert_eq!(
+            CaptionUiMode::Diagnostic.application_id(),
+            DIAGNOSTIC_APPLICATION_ID
+        );
     }
 }

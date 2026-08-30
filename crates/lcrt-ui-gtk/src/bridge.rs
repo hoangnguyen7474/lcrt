@@ -12,6 +12,8 @@ pub enum CaptionUiAction {
     },
     /// Stop caption processing and release capture resources.
     Stop,
+    /// Terminate the controller after cancelling any active caption session.
+    Shutdown,
 }
 
 /// State change consumed on the GTK main thread.

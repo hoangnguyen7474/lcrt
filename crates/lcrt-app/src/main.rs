@@ -15,7 +15,9 @@ use std::{
 use lcrt_audio_pipewire::{PipeWireCapture, PipeWireCaptureConfig, enumerate_audio_sources};
 use lcrt_core::{AudioSourceDescriptor, CaptionPipeline, RunSummary, RuntimeConfig};
 use lcrt_stt_whisper::{WhisperConfig, WhisperTranscriber};
-use lcrt_ui_gtk::{CaptionUiAction, CaptionUiOptions, GtkCaptionSink, run_caption_ui};
+use lcrt_ui_gtk::{
+    CaptionUiAction, CaptionUiMode, CaptionUiOptions, GtkCaptionSink, run_caption_ui,
+};
 use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 
@@ -47,6 +49,25 @@ struct PipelineSession {
     cancelled: Arc<AtomicBool>,
     result: Receiver<Result<RunSummary, String>>,
     worker: JoinHandle<()>,
+}
+
+/// The controller is the authoritative owner of application termination.
+///
+/// `Active` owns the only live pipeline session. A shutdown transitions through
+/// `ShutdownRequested`, cancels that session if present, and then detaches it
+/// before reaching `Terminated`; the GTK thread never waits for worker joins.
+enum ControllerState {
+    Idle,
+    Active(PipelineSession),
+    ShutdownRequested,
+    Terminated,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ControllerOutcome {
+    Completed,
+    SmokeSucceeded,
+    SmokeFailed,
 }
 
 fn main() -> ExitCode {
@@ -150,16 +171,17 @@ fn run_application(
         spawn_smoke_actions(actions.clone(), smoke);
     }
     let options = CaptionUiOptions {
+        mode: if config.smoke.is_some() {
+            CaptionUiMode::Diagnostic
+        } else {
+            CaptionUiMode::Normal
+        },
         sources,
         ..CaptionUiOptions::default()
     };
     let status = run_caption_ui(events, actions, options);
-    let controller_ok = controller.join().is_ok();
-    if status == gtk::glib::ExitCode::SUCCESS && controller_ok {
-        ExitCode::SUCCESS
-    } else {
-        ExitCode::FAILURE
-    }
+    let controller_outcome = controller.join().ok();
+    application_exit_status(status == gtk::glib::ExitCode::SUCCESS, controller_outcome)
 }
 
 fn run_controller(
@@ -167,20 +189,25 @@ fn run_controller(
     sources: Vec<AudioSourceDescriptor>,
     sink: GtkCaptionSink,
     actions: Receiver<CaptionUiAction>,
-) {
-    let mut session: Option<PipelineSession> = None;
+) -> ControllerOutcome {
+    let mut state = ControllerState::Idle;
     loop {
-        if let Some(completed) = take_completed_session(&mut session) {
+        if let Some(completed) = take_completed_session(&mut state) {
+            let smoke_succeeded = completed.is_ok();
             publish_completion(&sink, completed);
             if config.smoke.is_some() {
                 let _ = sink.quit();
-                break;
+                return if smoke_succeeded {
+                    ControllerOutcome::SmokeSucceeded
+                } else {
+                    ControllerOutcome::SmokeFailed
+                };
             }
         }
 
         match actions.recv_timeout(CONTROLLER_POLL_INTERVAL) {
             Ok(CaptionUiAction::Start { source_id }) => {
-                if session.is_some() {
+                if !matches!(state, ControllerState::Idle) {
                     let _ = sink.show_error("Captioning is already running.");
                     continue;
                 }
@@ -192,7 +219,7 @@ fn run_controller(
                     let _ = sink.show_error("The selected PipeWire source is no longer available.");
                     if config.smoke.is_some() {
                         let _ = sink.quit();
-                        break;
+                        return ControllerOutcome::SmokeFailed;
                     }
                     continue;
                 };
@@ -202,7 +229,7 @@ fn run_controller(
                     );
                     if config.smoke.is_some() {
                         let _ = sink.quit();
-                        break;
+                        return ControllerOutcome::SmokeFailed;
                     }
                     continue;
                 };
@@ -210,34 +237,51 @@ fn run_controller(
                 let _ = sink.set_running(true);
                 let _ = sink.set_status("Loading model…");
                 match start_pipeline(source, model_path, config.language.clone(), sink.clone()) {
-                    Ok(started) => session = Some(started),
+                    Ok(started) => state = ControllerState::Active(started),
                     Err(message) => {
                         let _ = sink.set_running(false);
                         let _ = sink.set_status("Error");
                         let _ = sink.show_error(message);
                         if config.smoke.is_some() {
                             let _ = sink.quit();
-                            break;
+                            return ControllerOutcome::SmokeFailed;
                         }
                     }
                 }
             }
             Ok(CaptionUiAction::Stop) => {
-                if let Some(session) = session.as_ref() {
+                if let ControllerState::Active(session) = &state {
                     session.cancelled.store(true, Ordering::Release);
                     let _ = sink.set_status("Stopping…");
                 }
             }
+            Ok(CaptionUiAction::Shutdown) => {
+                request_controller_shutdown(&mut state);
+                return if config.smoke.is_some() {
+                    ControllerOutcome::SmokeFailed
+                } else {
+                    ControllerOutcome::Completed
+                };
+            }
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => {
-                if let Some(session) = session.take() {
-                    session.cancelled.store(true, Ordering::Release);
-                    let _ = session.worker.join();
-                }
-                break;
+                request_controller_shutdown(&mut state);
+                return if config.smoke.is_some() {
+                    ControllerOutcome::SmokeFailed
+                } else {
+                    ControllerOutcome::Completed
+                };
             }
         }
     }
+}
+
+fn request_controller_shutdown(state: &mut ControllerState) {
+    let previous = std::mem::replace(state, ControllerState::ShutdownRequested);
+    if let ControllerState::Active(session) = previous {
+        session.cancelled.store(true, Ordering::Release);
+    }
+    *state = ControllerState::Terminated;
 }
 
 fn start_pipeline(
@@ -280,21 +324,43 @@ fn run_pipeline(
     Ok(pipeline.run(cancelled)?)
 }
 
-fn take_completed_session(
-    session: &mut Option<PipelineSession>,
-) -> Option<Result<RunSummary, String>> {
-    let result = match session.as_ref()?.result.try_recv() {
-        Ok(result) => result,
-        Err(TryRecvError::Empty) => return None,
-        Err(TryRecvError::Disconnected) => {
-            Err("caption pipeline result channel disconnected".to_owned())
-        }
+fn take_completed_session(state: &mut ControllerState) -> Option<Result<RunSummary, String>> {
+    let result = match state {
+        ControllerState::Active(session) => match session.result.try_recv() {
+            Ok(result) => result,
+            Err(TryRecvError::Empty) => return None,
+            Err(TryRecvError::Disconnected) => {
+                Err("caption pipeline result channel disconnected".to_owned())
+            }
+        },
+        ControllerState::Idle
+        | ControllerState::ShutdownRequested
+        | ControllerState::Terminated => return None,
     };
-    let completed = session.take()?;
+    let previous = std::mem::replace(state, ControllerState::Idle);
+    let ControllerState::Active(completed) = previous else {
+        unreachable!("only an active session can produce a completion");
+    };
     if completed.worker.join().is_err() {
         return Some(Err("caption pipeline worker panicked".to_owned()));
     }
     Some(result)
+}
+
+fn application_exit_status(
+    gtk_succeeded: bool,
+    controller_outcome: Option<ControllerOutcome>,
+) -> ExitCode {
+    if gtk_succeeded
+        && matches!(
+            controller_outcome,
+            Some(ControllerOutcome::Completed | ControllerOutcome::SmokeSucceeded)
+        )
+    {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
 }
 
 fn publish_completion(sink: &GtkCaptionSink, result: Result<RunSummary, String>) {
@@ -417,9 +483,21 @@ fn usage() -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use std::{ffi::OsString, time::Duration};
+    use std::{
+        ffi::OsString,
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+            mpsc::sync_channel,
+        },
+        thread,
+        time::Duration,
+    };
 
-    use super::{AppConfig, ParsedCommand, SmokeConfig, parse_arguments};
+    use super::{
+        AppConfig, ControllerOutcome, ControllerState, ParsedCommand, PipelineSession, SmokeConfig,
+        application_exit_status, parse_arguments, request_controller_shutdown,
+    };
 
     #[test]
     fn parses_model_language_and_bounded_smoke_configuration() {
@@ -454,5 +532,62 @@ mod tests {
         assert!(parse_arguments([OsString::from("--smoke-seconds"), OsString::from("0")]).is_err());
         assert!(parse_arguments([OsString::from("--smoke-seconds"), OsString::from("5")]).is_err());
         assert!(parse_arguments([OsString::from("--unknown")]).is_err());
+    }
+
+    #[test]
+    fn successful_smoke_outcome_returns_success() {
+        assert_eq!(
+            application_exit_status(true, Some(ControllerOutcome::SmokeSucceeded)),
+            std::process::ExitCode::SUCCESS
+        );
+    }
+
+    #[test]
+    fn failed_smoke_outcome_returns_failure() {
+        assert_eq!(
+            application_exit_status(true, Some(ControllerOutcome::SmokeFailed)),
+            std::process::ExitCode::FAILURE
+        );
+    }
+
+    #[test]
+    fn shutdown_without_a_session_terminates_the_controller() {
+        let mut state = ControllerState::Idle;
+
+        request_controller_shutdown(&mut state);
+
+        assert!(matches!(state, ControllerState::Terminated));
+    }
+
+    #[test]
+    fn shutdown_cancels_an_active_session_without_waiting_for_its_worker() {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let worker_cancelled = Arc::clone(&cancelled);
+        let (_result_sender, result) = sync_channel(1);
+        let worker = thread::spawn(move || {
+            while !worker_cancelled.load(Ordering::Acquire) {
+                thread::yield_now();
+            }
+        });
+        let mut state = ControllerState::Active(PipelineSession {
+            cancelled: Arc::clone(&cancelled),
+            result,
+            worker,
+        });
+
+        request_controller_shutdown(&mut state);
+
+        assert!(cancelled.load(Ordering::Acquire));
+        assert!(matches!(state, ControllerState::Terminated));
+    }
+
+    #[test]
+    fn repeated_shutdown_is_idempotent() {
+        let mut state = ControllerState::Idle;
+
+        request_controller_shutdown(&mut state);
+        request_controller_shutdown(&mut state);
+
+        assert!(matches!(state, ControllerState::Terminated));
     }
 }
