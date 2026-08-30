@@ -7,7 +7,7 @@ use std::{
         Receiver, RecvTimeoutError, SyncSender, TryRecvError, TrySendError, sync_channel,
     },
     thread::{self, JoinHandle},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use lcrt_core::{
@@ -77,7 +77,18 @@ enum ControlEvent {
     Stopped,
 }
 
+enum ControlPoll {
+    Event(ControlEvent),
+    Empty,
+    Disconnected,
+}
+
 /// A live PipeWire session implementing the portable [`AudioCapture`] port.
+///
+/// Shutdown waits are bounded. If a worker misses that bound, the capture keeps
+/// its join handle so a later [`AudioCapture::stop`] call can finish cleanup.
+/// Dropping an instance whose worker remains permanently unresponsive still
+/// detaches that Rust thread because stable Rust cannot safely terminate it.
 pub struct PipeWireCapture {
     source: AudioSourceDescriptor,
     audio_events: Receiver<AudioEvent>,
@@ -86,6 +97,7 @@ pub struct PipeWireCapture {
     worker_done: Receiver<()>,
     worker: Option<JoinHandle<Result<(), PipeWireError>>>,
     shutdown_timeout: Duration,
+    stop_requested: bool,
     stopped: bool,
     terminal: bool,
 }
@@ -97,6 +109,7 @@ impl PipeWireCapture {
         config: PipeWireCaptureConfig,
     ) -> Result<Self, PipeWireError> {
         config.validate()?;
+        let startup_started = Instant::now();
         let (audio_sender, audio_events) = sync_channel(config.queue_capacity);
         // Control events have their own one-item bounded channel. Audio may be
         // dropped under backpressure, but a terminal failure can never be
@@ -126,7 +139,10 @@ impl PipeWireCapture {
             })
             .map_err(|error| PipeWireError::Worker(error.to_string()))?;
 
-        match startup_receiver.recv_timeout(config.startup_timeout) {
+        match startup_receiver.recv_timeout(remaining_budget(
+            config.startup_timeout,
+            startup_started.elapsed(),
+        )) {
             Ok(Ok(())) => {
                 info!(source_id = source.id(), "PipeWire capture streaming");
                 Ok(Self {
@@ -137,22 +153,36 @@ impl PipeWireCapture {
                     worker_done,
                     worker: Some(worker),
                     shutdown_timeout: config.shutdown_timeout,
+                    stop_requested: false,
                     stopped: false,
                     terminal: false,
                 })
             }
             Ok(Err(message)) => {
                 let _ = stop_sender.send(());
-                wait_for_worker(&worker_done, config.shutdown_timeout);
+                wait_for_worker(
+                    &worker_done,
+                    remaining_budget(config.startup_timeout, startup_started.elapsed()),
+                );
                 Err(PipeWireError::PipeWire(message))
             }
             Err(RecvTimeoutError::Timeout) => {
                 let _ = stop_sender.send(());
-                wait_for_worker(&worker_done, config.shutdown_timeout);
+                // Returning remains bounded by startup_timeout. If PipeWire is
+                // too unresponsive to process the stop request within the
+                // remaining budget, Rust provides no safe way to terminate the
+                // worker; dropping this handle detaches that worker.
+                wait_for_worker(
+                    &worker_done,
+                    remaining_budget(config.startup_timeout, startup_started.elapsed()),
+                );
                 Err(PipeWireError::StartupTimeout(config.startup_timeout))
             }
             Err(RecvTimeoutError::Disconnected) => {
-                wait_for_worker(&worker_done, config.shutdown_timeout);
+                wait_for_worker(
+                    &worker_done,
+                    remaining_budget(config.startup_timeout, startup_started.elapsed()),
+                );
                 Err(PipeWireError::WorkerStopped)
             }
         }
@@ -162,19 +192,21 @@ impl PipeWireCapture {
         if self.stopped {
             return Ok(());
         }
-        self.stopped = true;
-        if let Some(sender) = self.stop_sender.take() {
-            let _ = sender.send(());
+        if !self.stop_requested {
+            self.stop_requested = true;
+            if let Some(sender) = self.stop_sender.take() {
+                let _ = sender.send(());
+            }
         }
-        let Some(worker) = self.worker.take() else {
+        if self.worker.is_none() {
+            self.stopped = true;
             return Ok(());
-        };
+        }
         match self.worker_done.recv_timeout(self.shutdown_timeout) {
             Ok(()) => {}
             Err(RecvTimeoutError::Timeout) => {
-                drop(worker);
                 return Err(AudioCaptureError::new(format!(
-                    "PipeWire capture worker did not stop within {:?}",
+                    "PipeWire capture worker did not stop within {:?}; shutdown remains pending and may be retried",
                     self.shutdown_timeout
                 )));
             }
@@ -184,6 +216,11 @@ impl PipeWireCapture {
                 // has been dropped.
             }
         }
+        let worker = self
+            .worker
+            .take()
+            .expect("worker was present while awaiting completion");
+        self.stopped = true;
         match worker.join() {
             Ok(Ok(())) => Ok(()),
             Ok(Err(error)) => Err(AudioCaptureError::new(error.to_string())),
@@ -200,38 +237,62 @@ impl AudioCapture for PipeWireCapture {
     }
 
     fn next_event(&mut self, timeout: Duration) -> Result<AudioInputEvent, AudioCaptureError> {
-        if self.stopped || self.terminal {
+        if self.stop_requested || self.stopped || self.terminal {
             return Ok(AudioInputEvent::EndOfStream);
         }
-        match self.control_events.try_recv() {
-            Ok(ControlEvent::Failure(message)) => {
-                self.terminal = true;
-                return Err(AudioCaptureError::new(message));
-            }
-            Ok(ControlEvent::Stopped) => {
-                self.terminal = true;
-                return Err(AudioCaptureError::new(
-                    "PipeWire capture stopped before the application requested shutdown",
-                ));
-            }
-            Err(TryRecvError::Disconnected) => {
+        match poll_control(&self.control_events) {
+            ControlPoll::Event(event) => return consume_control(event, &mut self.terminal),
+            ControlPoll::Disconnected => {
                 return Err(AudioCaptureError::new(
                     "PipeWire capture control channel disconnected unexpectedly",
                 ));
             }
-            Err(TryRecvError::Empty) => {}
+            ControlPoll::Empty => {}
         }
         match self.audio_events.recv_timeout(timeout) {
             Ok(AudioEvent::Audio(chunk)) => Ok(AudioInputEvent::Chunk(chunk)),
             Err(RecvTimeoutError::Timeout) => Ok(AudioInputEvent::Idle),
-            Err(RecvTimeoutError::Disconnected) => Err(AudioCaptureError::new(
-                "PipeWire capture audio channel disconnected unexpectedly",
-            )),
+            Err(RecvTimeoutError::Disconnected) => {
+                result_after_audio_disconnect(&self.control_events, &mut self.terminal)
+            }
         }
     }
 
     fn stop(&mut self) -> Result<(), AudioCaptureError> {
         self.shutdown()
+    }
+}
+
+fn poll_control(control_events: &Receiver<ControlEvent>) -> ControlPoll {
+    match control_events.try_recv() {
+        Ok(event) => ControlPoll::Event(event),
+        Err(TryRecvError::Empty) => ControlPoll::Empty,
+        Err(TryRecvError::Disconnected) => ControlPoll::Disconnected,
+    }
+}
+
+fn consume_control(
+    event: ControlEvent,
+    terminal: &mut bool,
+) -> Result<AudioInputEvent, AudioCaptureError> {
+    *terminal = true;
+    match event {
+        ControlEvent::Failure(message) => Err(AudioCaptureError::new(message)),
+        ControlEvent::Stopped => Err(AudioCaptureError::new(
+            "PipeWire capture stopped before the application requested shutdown",
+        )),
+    }
+}
+
+fn result_after_audio_disconnect(
+    control_events: &Receiver<ControlEvent>,
+    terminal: &mut bool,
+) -> Result<AudioInputEvent, AudioCaptureError> {
+    match poll_control(control_events) {
+        ControlPoll::Event(event) => consume_control(event, terminal),
+        ControlPoll::Empty | ControlPoll::Disconnected => Err(AudioCaptureError::new(
+            "PipeWire capture audio channel disconnected unexpectedly",
+        )),
     }
 }
 
@@ -249,6 +310,7 @@ struct WorkerData {
     startup: Option<SyncSender<Result<(), String>>>,
     mainloop: pw::main_loop::MainLoopWeak,
     dropped_chunks: Rc<Cell<u64>>,
+    corrupted_chunks: Rc<Cell<u64>>,
     terminal_sent: Rc<Cell<bool>>,
     control_events: SyncSender<ControlEvent>,
     stop_requested: Rc<Cell<bool>>,
@@ -285,6 +347,7 @@ fn run_worker(
     let stream = pw::stream::StreamBox::new(&core, "lcrt-audio-capture", stream_properties)
         .map_err(pipewire_error)?;
     let dropped_chunks = Rc::new(Cell::new(0));
+    let corrupted_chunks = Rc::new(Cell::new(0));
     let terminal_sent = Rc::new(Cell::new(false));
     let worker_data = WorkerData {
         format: None,
@@ -292,6 +355,7 @@ fn run_worker(
         startup: Some(startup),
         mainloop: mainloop.downgrade(),
         dropped_chunks: Rc::clone(&dropped_chunks),
+        corrupted_chunks: Rc::clone(&corrupted_chunks),
         terminal_sent: Rc::clone(&terminal_sent),
         control_events: control_events.clone(),
         stop_requested: Rc::clone(&stop_requested),
@@ -389,29 +453,63 @@ fn run_worker(
             let offset = plane.chunk().offset();
             let size = plane.chunk().size();
             let flags = plane.chunk().flags().bits();
-            let Some(bytes) = plane.data() else {
-                report_fatal(
-                    data,
-                    PipeWireError::MalformedBuffer("mapped PCM data was unavailable".to_owned()),
-                );
-                return;
+            let max_size = match usize::try_from(plane.as_raw().maxsize) {
+                Ok(max_size) => max_size,
+                Err(error) => {
+                    report_fatal(
+                        data,
+                        PipeWireError::MalformedBuffer(format!(
+                            "mapped backing size cannot be represented: {error}"
+                        )),
+                    );
+                    return;
+                }
             };
-            let bytes = match normalized_chunk_bytes(bytes, offset, size, flags) {
-                Ok(Some(bytes)) => bytes,
-                // SPA_CHUNK_FLAG_EMPTY has no reliable payload duration in this
-                // adapter. Skipping it avoids decoding stale mapped storage as
-                // audio while preserving bounded realtime behavior.
-                Ok(None) => return,
+            let layout = match chunk_layout(max_size, offset, size, flags) {
+                Ok(layout) => layout,
                 Err(error) => {
                     report_fatal(data, PipeWireError::MalformedBuffer(error));
                     return;
                 }
             };
-            let chunk = match decode_f32le(&bytes, format) {
-                Ok(chunk) => chunk,
-                Err(error) => {
-                    report_fatal(data, PipeWireError::MalformedBuffer(error));
+            let chunk = match layout {
+                ChunkLayout::Corrupted => {
+                    data.corrupted_chunks
+                        .set(data.corrupted_chunks.get().saturating_add(1));
                     return;
+                }
+                ChunkLayout::NoMedia => return,
+                ChunkLayout::Silence { byte_len } => match decode_silence(byte_len, format) {
+                    Ok(chunk) => chunk,
+                    Err(error) => {
+                        report_fatal(data, PipeWireError::MalformedBuffer(error));
+                        return;
+                    }
+                },
+                ChunkLayout::Payload { start, byte_len } => {
+                    let Some(backing) = plane.data() else {
+                        report_fatal(
+                            data,
+                            PipeWireError::MalformedBuffer(
+                                "mapped PCM data was unavailable".to_owned(),
+                            ),
+                        );
+                        return;
+                    };
+                    let bytes = match normalized_chunk_bytes(backing, max_size, start, byte_len) {
+                        Ok(bytes) => bytes,
+                        Err(error) => {
+                            report_fatal(data, PipeWireError::MalformedBuffer(error));
+                            return;
+                        }
+                    };
+                    match decode_f32le(&bytes, format) {
+                        Ok(chunk) => chunk,
+                        Err(error) => {
+                            report_fatal(data, PipeWireError::MalformedBuffer(error));
+                            return;
+                        }
+                    }
                 }
             };
             match data.audio_events.try_send(AudioEvent::Audio(chunk)) {
@@ -461,6 +559,13 @@ fn run_worker(
         warn!(
             dropped_chunks,
             "dropped PipeWire audio chunks because the bounded queue was full"
+        );
+    }
+    let corrupted_chunks = corrupted_chunks.get();
+    if corrupted_chunks > 0 {
+        warn!(
+            corrupted_chunks,
+            "dropped PipeWire audio chunks marked as corrupted"
         );
     }
     if !terminal_sent.get() && !stop_requested.get() {
@@ -524,51 +629,101 @@ fn wait_for_worker(worker_done: &Receiver<()>, timeout: Duration) {
 
 const SPA_CHUNK_FLAG_EMPTY: i32 = 1 << 1;
 
-fn normalized_chunk_bytes(
-    backing: &[u8],
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ChunkLayout {
+    Corrupted,
+    NoMedia,
+    Silence { byte_len: usize },
+    Payload { start: usize, byte_len: usize },
+}
+
+fn chunk_layout(
+    max_size: usize,
     offset: u32,
     size: u32,
     flags: i32,
-) -> Result<Option<Cow<'_, [u8]>>, String> {
+) -> Result<ChunkLayout, String> {
     if flags & spa::buffer::ChunkFlags::CORRUPTED.bits() != 0 {
-        return Err("PipeWire marked the chunk as corrupted".to_owned());
+        return Ok(ChunkLayout::Corrupted);
     }
-    // libspa 0.10 exposes raw chunk flags but does not name EMPTY. The
-    // supported SPA headers define bit 1 as SPA_CHUNK_FLAG_EMPTY: its backing
-    // bytes are media-specific neutral data and must not be decoded as PCM.
-    if flags & SPA_CHUNK_FLAG_EMPTY != 0 || size == 0 {
-        return Ok(None);
+    if size == 0 {
+        return Ok(ChunkLayout::NoMedia);
     }
-    if backing.is_empty() {
-        return Err("chunk contains data but its mapped backing buffer is empty".to_owned());
+    if max_size == 0 {
+        return Err("chunk contains media but its maximum backing size is zero".to_owned());
     }
 
-    let backing_len = backing.len();
+    let size = usize::try_from(size)
+        .map_err(|_| "chunk size cannot be represented on this platform".to_owned())?
+        .min(max_size);
+    // libspa 0.10 exposes raw chunk flags but does not name EMPTY. The
+    // supported SPA headers define bit 1 as SPA_CHUNK_FLAG_EMPTY. For F32LE
+    // audio its clamped size represents neutral PCM duration, not stale bytes.
+    if flags & SPA_CHUNK_FLAG_EMPTY != 0 {
+        return Ok(ChunkLayout::Silence { byte_len: size });
+    }
+
     let offset = usize::try_from(offset)
         .map_err(|_| "chunk offset cannot be represented on this platform".to_owned())?;
-    let size = usize::try_from(size)
-        .map_err(|_| "chunk size cannot be represented on this platform".to_owned())?;
-    if size > backing_len {
+    Ok(ChunkLayout::Payload {
+        start: offset % max_size,
+        byte_len: size,
+    })
+}
+
+fn normalized_chunk_bytes(
+    backing: &[u8],
+    max_size: usize,
+    start: usize,
+    byte_len: usize,
+) -> Result<Cow<'_, [u8]>, String> {
+    if backing.len() != max_size {
         return Err(format!(
-            "chunk size {size} exceeds mapped backing buffer size {backing_len}"
+            "mapped backing length {} does not match advertised maximum size {max_size}",
+            backing.len()
         ));
     }
-
-    // SPA defines offset modulo data.maxsize. `Data::data` exposes precisely
-    // that mapped max-size range, so normalize before forming a Rust slice.
-    let start = offset % backing_len;
-    let end = start
-        .checked_add(size)
-        .ok_or_else(|| "normalized chunk range overflowed".to_owned())?;
-    if end <= backing_len {
-        return Ok(Some(Cow::Borrowed(&backing[start..end])));
+    if max_size == 0 || start >= max_size || byte_len > max_size {
+        return Err("normalized chunk range is inconsistent with its backing buffer".to_owned());
     }
 
-    let wrapped_end = end - backing_len;
-    let mut normalized = Vec::with_capacity(size);
+    let end = start
+        .checked_add(byte_len)
+        .ok_or_else(|| "normalized chunk range overflowed".to_owned())?;
+    if end <= max_size {
+        return Ok(Cow::Borrowed(&backing[start..end]));
+    }
+
+    let wrapped_end = end - max_size;
+    let mut normalized = Vec::with_capacity(byte_len);
     normalized.extend_from_slice(&backing[start..]);
     normalized.extend_from_slice(&backing[..wrapped_end]);
-    Ok(Some(Cow::Owned(normalized)))
+    Ok(Cow::Owned(normalized))
+}
+
+fn decode_silence(byte_len: usize, format: NegotiatedFormat) -> Result<AudioChunk, String> {
+    let sample_size = mem::size_of::<f32>();
+    if byte_len % sample_size != 0 {
+        return Err("PipeWire returned an EMPTY chunk with a partial F32 sample".to_owned());
+    }
+    let sample_count = byte_len / sample_size;
+    let channels = usize::from(format.channels);
+    if sample_count % channels != 0 {
+        return Err(format!(
+            "PipeWire returned an EMPTY chunk whose {sample_count} samples do not form complete {}-channel frames",
+            format.channels
+        ));
+    }
+    AudioChunk::new(
+        vec![0.0; sample_count],
+        format.sample_rate_hz,
+        format.channels,
+    )
+    .map_err(|error| format!("PipeWire produced invalid silent PCM: {error}"))
+}
+
+fn remaining_budget(limit: Duration, elapsed: Duration) -> Duration {
+    limit.saturating_sub(elapsed)
 }
 
 fn decode_f32le(bytes: &[u8], format: NegotiatedFormat) -> Result<AudioChunk, String> {
@@ -589,12 +744,18 @@ fn pipewire_error(error: pw::Error) -> PipeWireError {
 
 #[cfg(test)]
 mod tests {
-    use std::{borrow::Cow, cell::Cell, sync::mpsc::sync_channel, time::Duration};
+    use std::{
+        cell::Cell,
+        sync::mpsc::{RecvTimeoutError, sync_channel},
+        thread,
+        time::Duration,
+    };
 
     use super::{
-        AudioEvent, ControlEvent, NegotiatedFormat, PipeWireCaptureConfig, SPA_CHUNK_FLAG_EMPTY,
-        capture_stream_flags, decode_f32le, normalized_chunk_bytes, stream_properties,
-        try_send_terminal_failure,
+        AudioEvent, ChunkLayout, ControlEvent, NegotiatedFormat, PipeWireCapture,
+        PipeWireCaptureConfig, SPA_CHUNK_FLAG_EMPTY, capture_stream_flags, chunk_layout,
+        decode_f32le, decode_silence, normalized_chunk_bytes, remaining_budget,
+        result_after_audio_disconnect, stream_properties, try_send_terminal_failure,
     };
     use crate::PipeWireError;
     use lcrt_core::{AudioChunk, AudioSourceDescriptor, AudioSourceKind};
@@ -668,53 +829,130 @@ mod tests {
 
     #[test]
     fn normalizes_a_contiguous_chunk_range() {
-        let bytes = normalized_chunk_bytes(&[0, 1, 2, 3], 1, 2, 0).unwrap();
-        assert_eq!(bytes, Some(Cow::Borrowed(&[1, 2][..])));
-    }
-
-    #[test]
-    fn normalizes_offset_and_reconstructs_wrapped_chunk_range() {
-        let bytes = normalized_chunk_bytes(&[0, 1, 2, 3], 7, 3, 0).unwrap();
-        assert_eq!(bytes, Some(Cow::Owned(vec![3, 0, 1])));
-    }
-
-    #[test]
-    fn skips_zero_length_and_empty_chunks_without_reading_backing_storage() {
-        assert_eq!(normalized_chunk_bytes(&[], 0, 0, 0).unwrap(), None);
+        let layout = chunk_layout(4, 1, 2, 0).unwrap();
         assert_eq!(
-            normalized_chunk_bytes(
-                &[255, 255, 255, 255],
-                u32::MAX,
-                u32::MAX,
-                SPA_CHUNK_FLAG_EMPTY
-            )
-            .unwrap(),
-            None
+            layout,
+            ChunkLayout::Payload {
+                start: 1,
+                byte_len: 2
+            }
+        );
+        let bytes = normalized_chunk_bytes(&[0, 1, 2, 3], 4, 1, 2).unwrap();
+        assert_eq!(bytes.as_ref(), &[1, 2]);
+    }
+
+    #[test]
+    fn normalizes_large_offset_and_reconstructs_wrapped_chunk_range() {
+        assert_eq!(
+            chunk_layout(4, u32::MAX, 3, 0).unwrap(),
+            ChunkLayout::Payload {
+                start: 3,
+                byte_len: 3
+            }
+        );
+        let bytes = normalized_chunk_bytes(&[0, 1, 2, 3], 4, 3, 3).unwrap();
+        assert_eq!(bytes.as_ref(), &[3, 0, 1]);
+    }
+
+    #[test]
+    fn clamps_oversized_contiguous_and_wrapped_chunk_ranges() {
+        assert_eq!(
+            chunk_layout(4, 0, 5, 0).unwrap(),
+            ChunkLayout::Payload {
+                start: 0,
+                byte_len: 4
+            }
+        );
+        assert_eq!(
+            normalized_chunk_bytes(&[0, 1, 2, 3], 4, 0, 4)
+                .unwrap()
+                .as_ref(),
+            &[0, 1, 2, 3]
+        );
+        assert_eq!(
+            chunk_layout(4, 3, u32::MAX, 0).unwrap(),
+            ChunkLayout::Payload {
+                start: 3,
+                byte_len: 4
+            }
+        );
+        assert_eq!(
+            normalized_chunk_bytes(&[0, 1, 2, 3], 4, 3, 4)
+                .unwrap()
+                .as_ref(),
+            &[3, 0, 1, 2]
         );
     }
 
     #[test]
-    fn rejects_oversized_and_unusable_chunk_ranges() {
+    fn handles_zero_size_and_rejects_empty_backing_with_media() {
         assert_eq!(
-            normalized_chunk_bytes(&[0, 1, 2, 3], 0, 5, 0),
-            Err("chunk size 5 exceeds mapped backing buffer size 4".to_owned())
+            chunk_layout(0, u32::MAX, 0, 0).unwrap(),
+            ChunkLayout::NoMedia
         );
         assert_eq!(
-            normalized_chunk_bytes(&[], 0, 1, 0),
-            Err("chunk contains data but its mapped backing buffer is empty".to_owned())
+            chunk_layout(0, 0, 1, 0),
+            Err("chunk contains media but its maximum backing size is zero".to_owned())
         );
     }
 
     #[test]
-    fn rejects_chunks_marked_corrupted() {
+    fn empty_chunk_becomes_bounded_neutral_pcm_without_reading_backing_bytes() {
+        let layout = chunk_layout(16, u32::MAX, 8, SPA_CHUNK_FLAG_EMPTY).unwrap();
+        assert_eq!(layout, ChunkLayout::Silence { byte_len: 8 });
+        let chunk = decode_silence(
+            8,
+            NegotiatedFormat {
+                sample_rate_hz: 48_000,
+                channels: 2,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(chunk.samples(), &[0.0, 0.0]);
+        assert_eq!(chunk.frame_count(), 1);
+    }
+
+    #[test]
+    fn empty_chunk_requires_complete_samples_and_frames() {
         assert_eq!(
-            normalized_chunk_bytes(
-                &[0, 1, 2, 3],
-                0,
-                4,
-                pipewire::spa::buffer::ChunkFlags::CORRUPTED.bits(),
+            decode_silence(
+                3,
+                NegotiatedFormat {
+                    sample_rate_hz: 48_000,
+                    channels: 1,
+                }
             ),
-            Err("PipeWire marked the chunk as corrupted".to_owned())
+            Err("PipeWire returned an EMPTY chunk with a partial F32 sample".to_owned())
+        );
+        assert_eq!(
+            decode_silence(
+                4,
+                NegotiatedFormat {
+                    sample_rate_hz: 48_000,
+                    channels: 2,
+                }
+            ),
+            Err(
+                "PipeWire returned an EMPTY chunk whose 1 samples do not form complete 2-channel frames"
+                    .to_owned()
+            )
+        );
+    }
+
+    #[test]
+    fn corrupted_chunk_is_dropped_without_becoming_a_terminal_error() {
+        assert_eq!(
+            chunk_layout(4, 0, 4, pipewire::spa::buffer::ChunkFlags::CORRUPTED.bits()).unwrap(),
+            ChunkLayout::Corrupted
+        );
+    }
+
+    #[test]
+    fn malformed_backing_relationship_is_rejected() {
+        assert_eq!(
+            normalized_chunk_bytes(&[0, 1, 2], 4, 0, 2),
+            Err("mapped backing length 3 does not match advertised maximum size 4".to_owned())
         );
     }
 
@@ -740,6 +978,28 @@ mod tests {
     }
 
     #[test]
+    fn queued_terminal_failure_wins_after_blocked_audio_receive_disconnects() {
+        let (audio_sender, audio_receiver) = sync_channel::<AudioEvent>(1);
+        let (control_sender, control_receiver) = sync_channel(1);
+        control_sender
+            .try_send(ControlEvent::Failure(
+                "selected source disconnected".to_owned(),
+            ))
+            .unwrap();
+        drop(audio_sender);
+
+        assert!(matches!(
+            audio_receiver.recv_timeout(Duration::from_secs(1)),
+            Err(RecvTimeoutError::Disconnected)
+        ));
+        let mut terminal = false;
+        let error = result_after_audio_disconnect(&control_receiver, &mut terminal).unwrap_err();
+
+        assert_eq!(error.to_string(), "selected source disconnected");
+        assert!(terminal);
+    }
+
+    #[test]
     fn terminal_failure_is_emitted_exactly_once() {
         let (control_sender, control_receiver) = sync_channel(1);
         let terminal_sent = Cell::new(false);
@@ -752,6 +1012,66 @@ mod tests {
             ControlEvent::Stopped => panic!("expected fatal failure"),
         }
         assert!(control_receiver.try_recv().is_err());
+    }
+
+    #[test]
+    fn startup_cleanup_uses_only_the_remaining_startup_budget() {
+        assert_eq!(
+            remaining_budget(Duration::from_secs(5), Duration::from_secs(3)),
+            Duration::from_secs(2)
+        );
+        assert_eq!(
+            remaining_budget(Duration::from_secs(5), Duration::from_secs(5)),
+            Duration::ZERO
+        );
+        assert_eq!(
+            remaining_budget(Duration::from_secs(5), Duration::from_secs(9)),
+            Duration::ZERO
+        );
+    }
+
+    #[test]
+    fn timed_out_shutdown_remains_retryable_until_worker_is_joined() {
+        let (_audio_sender, audio_events) = sync_channel(1);
+        let (_control_sender, control_events) = sync_channel(1);
+        let (worker_done_sender, worker_done) = sync_channel(1);
+        let (release_sender, release_receiver) = sync_channel(1);
+        let (completion_sender, completion_receiver) = sync_channel(1);
+        let worker = thread::spawn(move || {
+            release_receiver.recv().unwrap();
+            worker_done_sender.try_send(()).unwrap();
+            completion_sender.try_send(()).unwrap();
+            Ok(())
+        });
+        let mut capture = PipeWireCapture {
+            source: AudioSourceDescriptor::new(
+                "test-source",
+                "Test source",
+                AudioSourceKind::Microphone,
+            ),
+            audio_events,
+            control_events,
+            stop_sender: None,
+            worker_done,
+            worker: Some(worker),
+            shutdown_timeout: Duration::ZERO,
+            stop_requested: false,
+            stopped: false,
+            terminal: false,
+        };
+
+        let first_error = capture.shutdown().unwrap_err();
+        assert!(first_error.to_string().contains("shutdown remains pending"));
+        assert!(capture.stop_requested);
+        assert!(!capture.stopped);
+        assert!(capture.worker.is_some());
+
+        release_sender.try_send(()).unwrap();
+        completion_receiver.recv().unwrap();
+        capture.shutdown().unwrap();
+        capture.shutdown().unwrap();
+        assert!(capture.stopped);
+        assert!(capture.worker.is_none());
     }
 
     #[test]
