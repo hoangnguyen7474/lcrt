@@ -40,8 +40,10 @@ adapters can later implement the same ports with WASAPI and a native Windows UI
 without changing caption domain logic.
 
 Audio adapters must bound their queues and honor the requested poll timeout.
-Transcription work must not run on a UI thread. UI sinks should enqueue or apply
-small immutable snapshots and must not perform speech inference.
+Transcription work must not run on a UI thread. The GTK sink coalesces partial
+captions into replaceable state, retains at most one unobserved final across an
+utterance rollover, and keeps lifecycle/error state independent of caption
+pressure. It performs no speech inference.
 
 On Stop, the portable pipeline ends PipeWire capture before flushing the final
 STT window. This prevents new audio from filling queues during inference while
@@ -62,6 +64,5 @@ when the window closes, so UI closure never waits on native inference. A worker
 permanently blocked in model loading or inference cannot be force-terminated
 safely; cancellable model loading is a later STT lifecycle milestone.
 
-Also deferred: UI-event coalescing and control-event transport redesign,
-PipeWire source refresh, capture-error final transcript flushing, V2
-translation, and packaging.
+Also deferred: PipeWire source refresh, capture-error final transcript
+flushing, V2 translation, and packaging.

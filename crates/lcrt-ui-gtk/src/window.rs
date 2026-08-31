@@ -308,34 +308,30 @@ fn build_window(
                 return glib::ControlFlow::Break;
             }
         };
-        if let Some(snapshot) = update.caption {
-            debug!(
-                revision = snapshot.revision(),
-                ui_state_age_us = snapshot.age().as_micros(),
-                "caption update reached GTK"
-            );
-            caption.set_text(snapshot.caption().text());
-            caption_status.set_text(match snapshot.caption().status() {
-                lcrt_core::CaptionStatus::Partial => "Listening…",
-                lcrt_core::CaptionStatus::Final => "Final",
-            });
-        }
-        if let Some(is_running) = update.running {
-            running.set(is_running);
-            source_picker.set_sensitive(!is_running && !sources.is_empty());
-            start_stop.set_label(if is_running { "Stop" } else { "Start" });
-            if is_running {
-                start_stop.remove_css_class("suggested-action");
-                start_stop.add_css_class("destructive-action");
-                caption_status.set_text("Listening…");
-            } else {
-                start_stop.remove_css_class("destructive-action");
-                start_stop.add_css_class("suggested-action");
-                caption_status.set_text("Stopped");
+        if let Some(presentation) = update.presentation {
+            if let Some(snapshot) = presentation.caption {
+                debug!(
+                    revision = snapshot.revision(),
+                    ui_state_age_us = snapshot.age().as_micros(),
+                    "caption update reached GTK"
+                );
+                caption.set_text(snapshot.caption().text());
             }
-        }
-        if let Some(status) = update.status {
-            caption_status.set_text(&status);
+            if let Some(is_running) = presentation.running {
+                running.set(is_running);
+                source_picker.set_sensitive(!is_running && !sources.is_empty());
+                start_stop.set_label(if is_running { "Stop" } else { "Start" });
+                if is_running {
+                    start_stop.remove_css_class("suggested-action");
+                    start_stop.add_css_class("destructive-action");
+                } else {
+                    start_stop.remove_css_class("destructive-action");
+                    start_stop.add_css_class("suggested-action");
+                }
+            }
+            if let Some(status) = presentation.status {
+                caption_status.set_text(&status);
+            }
         }
         if let Some(error) = update.error {
             if let Some(message) = error {

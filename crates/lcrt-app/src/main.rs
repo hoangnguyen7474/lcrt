@@ -141,23 +141,17 @@ fn run_application(
     }
 
     let (actions, action_receiver) = sync_channel(UI_ACTION_CAPACITY);
-    let controller_sink = sink.clone();
     let controller_sources = sources.clone();
     let controller_config = config.clone();
     let controller = thread::Builder::new()
         .name("lcrt-application-controller".to_owned())
         .spawn(move || {
-            run_controller(
-                controller_config,
-                controller_sources,
-                controller_sink,
-                action_receiver,
-            )
+            run_controller(controller_config, controller_sources, sink, action_receiver)
         });
     let controller = match controller {
         Ok(controller) => controller,
         Err(error) => {
-            notify_ui(sink.show_error(format!("Could not start the caption controller: {error}")));
+            error!(%error, "could not start the caption controller");
             return ExitCode::FAILURE;
         }
     };
