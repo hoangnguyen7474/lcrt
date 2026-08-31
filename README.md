@@ -85,10 +85,11 @@ discovery occurs at launch; and responsiveness depends on model, CPU, language,
 and audio conditions. Closing the window requests pipeline cancellation and
 does not wait for a worker join, so a worker permanently blocked in native model
 or inference code cannot be force-terminated safely; it also cannot delay GTK
-or normal process termination. Once the native call returns, cancellation
-prevents LCRT-controlled work from starting PipeWire capture or processing a
-newly polled audio chunk. The bounded smoke option is intended for diagnostics,
-not normal use.
+or normal process termination. If cancellation wins before LCRT commits audio
+acquisition, PipeWire capture never starts; if acquisition commits first, a
+later cancellation stops that session once startup returns. Cancellation also
+prevents processing a newly polled audio chunk. The bounded smoke option is
+intended for diagnostics, not normal use.
 
 ### Linux audio development
 

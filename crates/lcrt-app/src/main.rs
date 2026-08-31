@@ -4,7 +4,7 @@ use std::{
     path::PathBuf,
     process::ExitCode,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
         mpsc::{Receiver, RecvTimeoutError, SyncSender, TryRecvError, sync_channel},
     },
@@ -47,9 +47,81 @@ enum ParsedCommand {
 }
 
 struct PipelineSession {
-    cancelled: Arc<AtomicBool>,
+    startup: Arc<StartupGate>,
     result: Receiver<Result<RunSummary, String>>,
     worker: JoinHandle<()>,
+}
+
+/// The startup phase guarded by [`StartupGate`].
+///
+/// `Cancelled` is reachable only when cancellation wins before audio
+/// acquisition commits. Cancellation after that commit is delivered through
+/// the gate's atomic flag so the active pipeline can stop without blocking on
+/// the startup mutex.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StartupPhase {
+    SttReady,
+    AudioAcquisition,
+    Active,
+    Cancelled,
+}
+
+/// Linearizes the race between stopping a session and starting audio capture.
+///
+/// The lock spans only the transition from `SttReady` to
+/// `AudioAcquisition`; native PipeWire startup runs after that transition has
+/// committed. Therefore, cancellation either wins while STT is ready and no
+/// audio starter is called, or acquisition wins and a later cancellation stops
+/// the resulting session once startup returns.
+struct StartupGate {
+    phase: Mutex<StartupPhase>,
+    cancelled: AtomicBool,
+}
+
+impl StartupGate {
+    fn new() -> Self {
+        Self {
+            phase: Mutex::new(StartupPhase::SttReady),
+            cancelled: AtomicBool::new(false),
+        }
+    }
+
+    fn cancel(&self) {
+        let mut phase = self.phase.lock().expect("startup phase mutex poisoned");
+        if matches!(*phase, StartupPhase::SttReady) {
+            *phase = StartupPhase::Cancelled;
+        }
+        self.cancelled.store(true, Ordering::Release);
+    }
+
+    fn begin_audio_acquisition(&self) -> bool {
+        let mut phase = self.phase.lock().expect("startup phase mutex poisoned");
+        if !matches!(*phase, StartupPhase::SttReady) {
+            return false;
+        }
+        *phase = StartupPhase::AudioAcquisition;
+        true
+    }
+
+    fn complete_audio_acquisition(&self) {
+        let mut phase = self.phase.lock().expect("startup phase mutex poisoned");
+        if matches!(*phase, StartupPhase::AudioAcquisition) {
+            *phase = StartupPhase::Active;
+        }
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Acquire)
+    }
+
+    fn cancellation_flag(&self) -> &AtomicBool {
+        &self.cancelled
+    }
+
+    #[cfg(test)]
+    fn phase(&self) -> StartupPhase {
+        *self.phase.lock().expect("startup phase mutex poisoned")
+    }
 }
 
 /// The controller is the authoritative owner of application termination.
@@ -242,7 +314,7 @@ fn run_controller(
             }
             Ok(CaptionUiAction::Stop) => {
                 if let ControllerState::Active(session) = &state {
-                    session.cancelled.store(true, Ordering::Release);
+                    session.startup.cancel();
                     notify_ui(sink.set_status("Stopping…"));
                 }
             }
@@ -270,7 +342,7 @@ fn run_controller(
 fn request_controller_shutdown(state: &mut ControllerState) {
     let previous = std::mem::replace(state, ControllerState::ShutdownRequested);
     if let ControllerState::Active(session) = previous {
-        session.cancelled.store(true, Ordering::Release);
+        session.startup.cancel();
     }
     *state = ControllerState::Terminated;
 }
@@ -281,19 +353,19 @@ fn start_pipeline(
     language: Option<String>,
     sink: GtkCaptionSink,
 ) -> Result<PipelineSession, String> {
-    let cancelled = Arc::new(AtomicBool::new(false));
-    let worker_cancelled = Arc::clone(&cancelled);
+    let startup = Arc::new(StartupGate::new());
+    let worker_startup = Arc::clone(&startup);
     let (result_sender, result) = sync_channel(1);
     let worker = thread::Builder::new()
         .name("lcrt-caption-pipeline".to_owned())
         .spawn(move || {
-            let result = run_pipeline(source, model_path, language, sink, &worker_cancelled)
+            let result = run_pipeline(source, model_path, language, sink, &worker_startup)
                 .map_err(|error| error.to_string());
             let _ = result_sender.send(result);
         })
         .map_err(|error| format!("could not start the caption pipeline worker: {error}"))?;
     Ok(PipelineSession {
-        cancelled,
+        startup,
         result,
         worker,
     })
@@ -304,30 +376,34 @@ fn run_pipeline(
     model_path: PathBuf,
     language: Option<String>,
     sink: GtkCaptionSink,
-    cancelled: &AtomicBool,
+    startup: &StartupGate,
 ) -> Result<RunSummary, Box<dyn std::error::Error + Send + Sync>> {
     let mut whisper_config = WhisperConfig::new(model_path);
     whisper_config.language = language;
     let transcriber = WhisperTranscriber::new(whisper_config)?;
-    let Some(audio) = start_audio_unless_cancelled(cancelled, || {
+    let Some(audio) = start_audio_after_stt(startup, || {
         PipeWireCapture::start(source, PipeWireCaptureConfig::default())
     })?
     else {
         return Ok(RunSummary::default());
     };
-    sink.set_status("Listening…")?;
+    if !startup.is_cancelled() {
+        sink.set_status("Listening…")?;
+    }
     let pipeline = CaptionPipeline::new(audio, transcriber, sink, RuntimeConfig::default())?;
-    Ok(pipeline.run(cancelled)?)
+    Ok(pipeline.run(startup.cancellation_flag())?)
 }
 
-fn start_audio_unless_cancelled<A, E>(
-    cancelled: &AtomicBool,
+fn start_audio_after_stt<A, E>(
+    startup: &StartupGate,
     start_audio: impl FnOnce() -> Result<A, E>,
 ) -> Result<Option<A>, E> {
-    if cancelled.load(Ordering::Acquire) {
+    if !startup.begin_audio_acquisition() {
         return Ok(None);
     }
-    start_audio().map(Some)
+    let audio = start_audio()?;
+    startup.complete_audio_acquisition();
+    Ok(Some(audio))
 }
 
 fn take_completed_session(state: &mut ControllerState) -> Option<Result<RunSummary, String>> {
@@ -500,7 +576,7 @@ mod tests {
     use std::{
         ffi::OsString,
         sync::{
-            Arc,
+            Arc, Barrier,
             atomic::{AtomicBool, Ordering},
             mpsc::sync_channel,
         },
@@ -510,8 +586,8 @@ mod tests {
 
     use super::{
         AppConfig, ControllerOutcome, ControllerState, ParsedCommand, PipelineSession, SmokeConfig,
-        application_exit_status, parse_arguments, request_controller_shutdown,
-        start_audio_unless_cancelled,
+        StartupGate, StartupPhase, application_exit_status, parse_arguments,
+        request_controller_shutdown, start_audio_after_stt,
     };
 
     #[test]
@@ -576,23 +652,23 @@ mod tests {
 
     #[test]
     fn shutdown_cancels_an_active_session_without_waiting_for_its_worker() {
-        let cancelled = Arc::new(AtomicBool::new(false));
-        let worker_cancelled = Arc::clone(&cancelled);
+        let startup = Arc::new(StartupGate::new());
+        let worker_startup = Arc::clone(&startup);
         let (_result_sender, result) = sync_channel(1);
         let worker = thread::spawn(move || {
-            while !worker_cancelled.load(Ordering::Acquire) {
+            while !worker_startup.is_cancelled() {
                 thread::yield_now();
             }
         });
         let mut state = ControllerState::Active(PipelineSession {
-            cancelled: Arc::clone(&cancelled),
+            startup: Arc::clone(&startup),
             result,
             worker,
         });
 
         request_controller_shutdown(&mut state);
 
-        assert!(cancelled.load(Ordering::Acquire));
+        assert!(startup.is_cancelled());
         assert!(matches!(state, ControllerState::Terminated));
     }
 
@@ -607,17 +683,61 @@ mod tests {
     }
 
     #[test]
-    fn cancellation_before_audio_acquisition_does_not_start_audio() {
-        let cancelled = AtomicBool::new(true);
-        let started = AtomicBool::new(false);
+    fn cancellation_winning_at_the_audio_boundary_does_not_start_audio() {
+        let startup = Arc::new(StartupGate::new());
+        let at_boundary = Arc::new(Barrier::new(2));
+        let release_worker = Arc::new(Barrier::new(2));
+        let started = Arc::new(AtomicBool::new(false));
+        let worker_startup = Arc::clone(&startup);
+        let worker_at_boundary = Arc::clone(&at_boundary);
+        let worker_release = Arc::clone(&release_worker);
+        let worker_started = Arc::clone(&started);
+        let worker = thread::spawn(move || {
+            worker_at_boundary.wait();
+            worker_release.wait();
+            start_audio_after_stt(&worker_startup, || {
+                worker_started.store(true, Ordering::Release);
+                Ok::<(), ()>(())
+            })
+            .unwrap()
+        });
 
-        let audio = start_audio_unless_cancelled(&cancelled, || {
-            started.store(true, Ordering::Release);
-            Ok::<(), ()>(())
-        })
-        .unwrap();
+        at_boundary.wait();
+        startup.cancel();
+        release_worker.wait();
 
-        assert!(audio.is_none());
+        assert!(worker.join().unwrap().is_none());
         assert!(!started.load(Ordering::Acquire));
+        assert_eq!(startup.phase(), StartupPhase::Cancelled);
+    }
+
+    #[test]
+    fn audio_acquisition_winning_before_stop_remains_a_valid_cancelled_session() {
+        let startup = Arc::new(StartupGate::new());
+        let starter_entered = Arc::new(Barrier::new(2));
+        let release_starter = Arc::new(Barrier::new(2));
+        let started = Arc::new(AtomicBool::new(false));
+        let worker_startup = Arc::clone(&startup);
+        let worker_starter_entered = Arc::clone(&starter_entered);
+        let worker_release_starter = Arc::clone(&release_starter);
+        let worker_started = Arc::clone(&started);
+        let worker = thread::spawn(move || {
+            start_audio_after_stt(&worker_startup, || {
+                worker_starter_entered.wait();
+                worker_release_starter.wait();
+                worker_started.store(true, Ordering::Release);
+                Ok::<(), ()>(())
+            })
+            .unwrap()
+        });
+
+        starter_entered.wait();
+        startup.cancel();
+        release_starter.wait();
+
+        assert_eq!(worker.join().unwrap(), Some(()));
+        assert!(started.load(Ordering::Acquire));
+        assert!(startup.is_cancelled());
+        assert_eq!(startup.phase(), StartupPhase::Active);
     }
 }
