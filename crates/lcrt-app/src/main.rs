@@ -309,10 +309,25 @@ fn run_pipeline(
     let mut whisper_config = WhisperConfig::new(model_path);
     whisper_config.language = language;
     let transcriber = WhisperTranscriber::new(whisper_config)?;
-    let audio = PipeWireCapture::start(source, PipeWireCaptureConfig::default())?;
+    let Some(audio) = start_audio_unless_cancelled(cancelled, || {
+        PipeWireCapture::start(source, PipeWireCaptureConfig::default())
+    })?
+    else {
+        return Ok(RunSummary::default());
+    };
     sink.set_status("Listening…")?;
     let pipeline = CaptionPipeline::new(audio, transcriber, sink, RuntimeConfig::default())?;
     Ok(pipeline.run(cancelled)?)
+}
+
+fn start_audio_unless_cancelled<A, E>(
+    cancelled: &AtomicBool,
+    start_audio: impl FnOnce() -> Result<A, E>,
+) -> Result<Option<A>, E> {
+    if cancelled.load(Ordering::Acquire) {
+        return Ok(None);
+    }
+    start_audio().map(Some)
 }
 
 fn take_completed_session(state: &mut ControllerState) -> Option<Result<RunSummary, String>> {
@@ -496,6 +511,7 @@ mod tests {
     use super::{
         AppConfig, ControllerOutcome, ControllerState, ParsedCommand, PipelineSession, SmokeConfig,
         application_exit_status, parse_arguments, request_controller_shutdown,
+        start_audio_unless_cancelled,
     };
 
     #[test]
@@ -588,5 +604,20 @@ mod tests {
         request_controller_shutdown(&mut state);
 
         assert!(matches!(state, ControllerState::Terminated));
+    }
+
+    #[test]
+    fn cancellation_before_audio_acquisition_does_not_start_audio() {
+        let cancelled = AtomicBool::new(true);
+        let started = AtomicBool::new(false);
+
+        let audio = start_audio_unless_cancelled(&cancelled, || {
+            started.store(true, Ordering::Release);
+            Ok::<(), ()>(())
+        })
+        .unwrap();
+
+        assert!(audio.is_none());
+        assert!(!started.load(Ordering::Acquire));
     }
 }

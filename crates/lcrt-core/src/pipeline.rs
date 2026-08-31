@@ -61,8 +61,9 @@ where
         info!(source_id, "caption pipeline started");
         let capture_result = self.capture_until_stopped(cancelled);
         let stop_result = self.audio.stop().map_err(PipelineError::Audio);
-        match (capture_result, stop_result) {
-            (Ok(mut summary), Ok(())) => {
+        match capture_result {
+            Ok(mut summary) => {
+                stop_result?;
                 let final_updates = self
                     .transcriber
                     .finish()
@@ -76,10 +77,13 @@ where
                 );
                 Ok(summary)
             }
-            (Err(error), Ok(())) => Err(error),
-            (Ok(_), Err(stop_error)) => Err(stop_error),
-            (Err(error), Err(stop_error)) => {
-                warn!(%stop_error, "audio shutdown also failed after pipeline error");
+            Err(error) => {
+                if let Err(stop_error) = stop_result {
+                    warn!(%stop_error, "audio shutdown also failed after pipeline error");
+                }
+                if matches!(&error, PipelineError::Audio(_)) {
+                    self.finish_after_capture_failure();
+                }
                 Err(error)
             }
         }
@@ -91,11 +95,14 @@ where
     ) -> Result<RunSummary, PipelineError> {
         let mut summary = RunSummary::default();
         while !cancelled.load(Ordering::Acquire) {
-            match self
+            let event = self
                 .audio
                 .next_event(self.config.audio_poll_timeout)
-                .map_err(PipelineError::Audio)?
-            {
+                .map_err(PipelineError::Audio)?;
+            if cancelled.load(Ordering::Acquire) {
+                break;
+            }
+            match event {
                 AudioInputEvent::Chunk(chunk) => {
                     if chunk.samples().len() > self.config.max_audio_chunk_samples {
                         return Err(PipelineError::AudioChunkTooLarge {
@@ -121,6 +128,18 @@ where
         }
 
         Ok(summary)
+    }
+
+    fn finish_after_capture_failure(&mut self) {
+        let mut ignored_summary = RunSummary::default();
+        match self.transcriber.finish() {
+            Ok(updates) => {
+                if let Err(error) = self.publish_updates(updates, &mut ignored_summary) {
+                    warn!(%error, "could not publish final captions after capture failure");
+                }
+            }
+            Err(error) => warn!(%error, "could not finalize transcription after capture failure"),
+        }
     }
 
     fn publish_updates(
@@ -211,8 +230,8 @@ mod tests {
     use std::{
         collections::VecDeque,
         sync::{
-            Arc,
-            atomic::{AtomicBool, Ordering},
+            Arc, Mutex,
+            atomic::{AtomicBool, AtomicUsize, Ordering},
         },
         time::Duration,
     };
@@ -227,8 +246,9 @@ mod tests {
 
     struct FakeAudio {
         source: AudioSourceDescriptor,
-        events: VecDeque<AudioInputEvent>,
+        events: VecDeque<Result<AudioInputEvent, AudioCaptureError>>,
         stopped: Arc<AtomicBool>,
+        cancel_after_poll: Option<Arc<AtomicBool>>,
     }
 
     impl AudioCapture for FakeAudio {
@@ -237,10 +257,14 @@ mod tests {
         }
 
         fn next_event(&mut self, _timeout: Duration) -> Result<AudioInputEvent, AudioCaptureError> {
-            Ok(self
+            let event = self
                 .events
                 .pop_front()
-                .unwrap_or(AudioInputEvent::EndOfStream))
+                .unwrap_or(Ok(AudioInputEvent::EndOfStream));
+            if let Some(cancelled) = self.cancel_after_poll.take() {
+                cancelled.store(true, Ordering::Release);
+            }
+            event
         }
 
         fn stop(&mut self) -> Result<(), AudioCaptureError> {
@@ -251,6 +275,9 @@ mod tests {
 
     struct FakeTranscriber {
         audio_stopped: Arc<AtomicBool>,
+        pushed_chunks: Arc<AtomicUsize>,
+        finish_calls: Arc<AtomicUsize>,
+        finish_result: Result<Vec<TranscriptUpdate>, TranscriptionError>,
     }
 
     impl Transcriber for FakeTranscriber {
@@ -258,16 +285,18 @@ mod tests {
             &mut self,
             _chunk: AudioChunk,
         ) -> Result<Vec<TranscriptUpdate>, TranscriptionError> {
+            self.pushed_chunks.fetch_add(1, Ordering::Relaxed);
             Ok(vec![TranscriptUpdate::partial("hello").unwrap()])
         }
 
         fn finish(&mut self) -> Result<Vec<TranscriptUpdate>, TranscriptionError> {
+            self.finish_calls.fetch_add(1, Ordering::Relaxed);
             if !self.audio_stopped.load(Ordering::Acquire) {
                 return Err(TranscriptionError::new(
                     "audio was not stopped before transcription flush",
                 ));
             }
-            Ok(vec![TranscriptUpdate::finalized("hello world").unwrap()])
+            self.finish_result.clone()
         }
     }
 
@@ -283,6 +312,25 @@ mod tests {
         }
     }
 
+    struct SharedSink {
+        snapshots: Arc<Mutex<Vec<CaptionSnapshot>>>,
+    }
+
+    impl CaptionSink for SharedSink {
+        fn publish(&mut self, snapshot: CaptionSnapshot) -> Result<(), CaptionSinkError> {
+            self.snapshots.lock().unwrap().push(snapshot);
+            Ok(())
+        }
+    }
+
+    struct FailingSink;
+
+    impl CaptionSink for FailingSink {
+        fn publish(&mut self, _snapshot: CaptionSnapshot) -> Result<(), CaptionSinkError> {
+            Err(CaptionSinkError::new("caption receiver disconnected"))
+        }
+    }
+
     fn audio_with(events: Vec<AudioInputEvent>, stopped: Arc<AtomicBool>) -> FakeAudio {
         FakeAudio {
             source: AudioSourceDescriptor::new(
@@ -290,8 +338,36 @@ mod tests {
                 "Test microphone",
                 AudioSourceKind::Microphone,
             ),
-            events: events.into(),
+            events: events.into_iter().map(Ok).collect(),
             stopped,
+            cancel_after_poll: None,
+        }
+    }
+
+    fn audio_error(error: AudioCaptureError, stopped: Arc<AtomicBool>) -> FakeAudio {
+        FakeAudio {
+            source: AudioSourceDescriptor::new(
+                "test-mic",
+                "Test microphone",
+                AudioSourceKind::Microphone,
+            ),
+            events: VecDeque::from([Err(error)]),
+            stopped,
+            cancel_after_poll: None,
+        }
+    }
+
+    fn transcriber(
+        stopped: Arc<AtomicBool>,
+        pushed_chunks: Arc<AtomicUsize>,
+        finish_calls: Arc<AtomicUsize>,
+        finish_result: Result<Vec<TranscriptUpdate>, TranscriptionError>,
+    ) -> FakeTranscriber {
+        FakeTranscriber {
+            audio_stopped: stopped,
+            pushed_chunks,
+            finish_calls,
+            finish_result,
         }
     }
 
@@ -307,9 +383,12 @@ mod tests {
         );
         let pipeline = CaptionPipeline::new(
             audio,
-            FakeTranscriber {
-                audio_stopped: Arc::clone(&stopped),
-            },
+            transcriber(
+                Arc::clone(&stopped),
+                Arc::new(AtomicUsize::new(0)),
+                Arc::new(AtomicUsize::new(0)),
+                Ok(vec![TranscriptUpdate::finalized("hello world").unwrap()]),
+            ),
             CollectingSink::default(),
             RuntimeConfig::default(),
         )
@@ -340,9 +419,12 @@ mod tests {
         };
         let pipeline = CaptionPipeline::new(
             audio,
-            FakeTranscriber {
-                audio_stopped: Arc::clone(&stopped),
-            },
+            transcriber(
+                Arc::clone(&stopped),
+                Arc::new(AtomicUsize::new(0)),
+                Arc::new(AtomicUsize::new(0)),
+                Ok(vec![TranscriptUpdate::finalized("hello world").unwrap()]),
+            ),
             CollectingSink::default(),
             config,
         )
@@ -356,5 +438,127 @@ mod tests {
             }
         ));
         assert!(stopped.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn cancellation_after_audio_poll_does_not_transcribe_the_returned_chunk() {
+        let stopped = Arc::new(AtomicBool::new(false));
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let pushed_chunks = Arc::new(AtomicUsize::new(0));
+        let mut audio = audio_with(
+            vec![AudioInputEvent::Chunk(
+                AudioChunk::new(vec![0.0; 160], 16_000, 1).unwrap(),
+            )],
+            Arc::clone(&stopped),
+        );
+        audio.cancel_after_poll = Some(Arc::clone(&cancelled));
+        let pipeline = CaptionPipeline::new(
+            audio,
+            transcriber(
+                Arc::clone(&stopped),
+                Arc::clone(&pushed_chunks),
+                Arc::new(AtomicUsize::new(0)),
+                Ok(vec![TranscriptUpdate::finalized("hello world").unwrap()]),
+            ),
+            CollectingSink::default(),
+            RuntimeConfig::default(),
+        )
+        .unwrap();
+
+        let summary = pipeline.run(&cancelled).unwrap();
+
+        assert_eq!(summary.audio_chunks, 0);
+        assert_eq!(pushed_chunks.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn capture_error_flushes_final_transcript_without_hiding_the_capture_error() {
+        let stopped = Arc::new(AtomicBool::new(false));
+        let finish_calls = Arc::new(AtomicUsize::new(0));
+        let snapshots = Arc::new(Mutex::new(Vec::new()));
+        let pipeline = CaptionPipeline::new(
+            audio_error(
+                AudioCaptureError::new("selected source disconnected"),
+                Arc::clone(&stopped),
+            ),
+            transcriber(
+                Arc::clone(&stopped),
+                Arc::new(AtomicUsize::new(0)),
+                Arc::clone(&finish_calls),
+                Ok(vec![
+                    TranscriptUpdate::finalized("last buffered words").unwrap(),
+                ]),
+            ),
+            SharedSink {
+                snapshots: Arc::clone(&snapshots),
+            },
+            RuntimeConfig::default(),
+        )
+        .unwrap();
+
+        let error = pipeline.run(&AtomicBool::new(false)).unwrap_err();
+
+        assert!(matches!(error, PipelineError::Audio(_)));
+        assert!(error.to_string().contains("selected source disconnected"));
+        assert_eq!(finish_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(snapshots.lock().unwrap().len(), 1);
+        assert_eq!(
+            snapshots.lock().unwrap()[0].caption().text(),
+            "last buffered words"
+        );
+    }
+
+    #[test]
+    fn capture_error_remains_primary_when_finalization_fails() {
+        let stopped = Arc::new(AtomicBool::new(false));
+        let finish_calls = Arc::new(AtomicUsize::new(0));
+        let pipeline = CaptionPipeline::new(
+            audio_error(
+                AudioCaptureError::new("selected source disconnected"),
+                Arc::clone(&stopped),
+            ),
+            transcriber(
+                Arc::clone(&stopped),
+                Arc::new(AtomicUsize::new(0)),
+                Arc::clone(&finish_calls),
+                Err(TranscriptionError::new("could not flush model")),
+            ),
+            CollectingSink::default(),
+            RuntimeConfig::default(),
+        )
+        .unwrap();
+
+        let error = pipeline.run(&AtomicBool::new(false)).unwrap_err();
+
+        assert!(matches!(error, PipelineError::Audio(_)));
+        assert!(error.to_string().contains("selected source disconnected"));
+        assert_eq!(finish_calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn capture_error_remains_primary_when_final_caption_publish_fails() {
+        let stopped = Arc::new(AtomicBool::new(false));
+        let pipeline = CaptionPipeline::new(
+            audio_error(
+                AudioCaptureError::new("selected source disconnected"),
+                Arc::clone(&stopped),
+            ),
+            transcriber(
+                Arc::clone(&stopped),
+                Arc::new(AtomicUsize::new(0)),
+                Arc::new(AtomicUsize::new(0)),
+                Ok(vec![
+                    TranscriptUpdate::finalized("last buffered words").unwrap(),
+                ]),
+            ),
+            FailingSink,
+            RuntimeConfig::default(),
+        )
+        .unwrap();
+
+        let error = pipeline.run(&AtomicBool::new(false)).unwrap_err();
+
+        assert!(matches!(error, PipelineError::Audio(_)));
+        assert!(error.to_string().contains("selected source disconnected"));
     }
 }
