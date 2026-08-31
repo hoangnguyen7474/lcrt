@@ -78,10 +78,14 @@ where
                 Ok(summary)
             }
             Err(error) => {
-                if let Err(stop_error) = stop_result {
-                    warn!(%stop_error, "audio shutdown also failed after pipeline error");
-                }
-                if matches!(&error, PipelineError::Audio(_)) {
+                let audio_stopped = match stop_result {
+                    Ok(()) => true,
+                    Err(stop_error) => {
+                        warn!(%stop_error, "audio shutdown also failed after pipeline error");
+                        false
+                    }
+                };
+                if audio_stopped && matches!(&error, PipelineError::Audio(_)) {
                     self.finish_after_capture_failure();
                 }
                 Err(error)
@@ -249,6 +253,7 @@ mod tests {
         events: VecDeque<Result<AudioInputEvent, AudioCaptureError>>,
         stopped: Arc<AtomicBool>,
         cancel_after_poll: Option<Arc<AtomicBool>>,
+        stop_error: Option<AudioCaptureError>,
     }
 
     impl AudioCapture for FakeAudio {
@@ -268,6 +273,9 @@ mod tests {
         }
 
         fn stop(&mut self) -> Result<(), AudioCaptureError> {
+            if let Some(error) = self.stop_error.take() {
+                return Err(error);
+            }
             self.stopped.store(true, Ordering::Release);
             Ok(())
         }
@@ -341,6 +349,7 @@ mod tests {
             events: events.into_iter().map(Ok).collect(),
             stopped,
             cancel_after_poll: None,
+            stop_error: None,
         }
     }
 
@@ -354,6 +363,7 @@ mod tests {
             events: VecDeque::from([Err(error)]),
             stopped,
             cancel_after_poll: None,
+            stop_error: None,
         }
     }
 
@@ -533,6 +543,38 @@ mod tests {
         assert!(matches!(error, PipelineError::Audio(_)));
         assert!(error.to_string().contains("selected source disconnected"));
         assert_eq!(finish_calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn capture_error_does_not_flush_while_audio_shutdown_is_incomplete() {
+        let stopped = Arc::new(AtomicBool::new(false));
+        let finish_calls = Arc::new(AtomicUsize::new(0));
+        let mut audio = audio_error(
+            AudioCaptureError::new("selected source disconnected"),
+            Arc::clone(&stopped),
+        );
+        audio.stop_error = Some(AudioCaptureError::new("capture shutdown timed out"));
+        let pipeline = CaptionPipeline::new(
+            audio,
+            transcriber(
+                Arc::clone(&stopped),
+                Arc::new(AtomicUsize::new(0)),
+                Arc::clone(&finish_calls),
+                Ok(vec![
+                    TranscriptUpdate::finalized("last buffered words").unwrap(),
+                ]),
+            ),
+            CollectingSink::default(),
+            RuntimeConfig::default(),
+        )
+        .unwrap();
+
+        let error = pipeline.run(&AtomicBool::new(false)).unwrap_err();
+
+        assert!(matches!(error, PipelineError::Audio(_)));
+        assert!(error.to_string().contains("selected source disconnected"));
+        assert!(!stopped.load(Ordering::Acquire));
+        assert_eq!(finish_calls.load(Ordering::Relaxed), 0);
     }
 
     #[test]
