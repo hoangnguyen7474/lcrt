@@ -11,13 +11,7 @@ fn main() -> ExitCode {
     let smoke_test = env::args()
         .skip(1)
         .any(|argument| argument == "--smoke-test");
-    let (sink, events) = match GtkCaptionSink::channel(32) {
-        Ok(channel) => channel,
-        Err(error) => {
-            eprintln!("error: {error}");
-            return ExitCode::FAILURE;
-        }
-    };
+    let (sink, events) = GtkCaptionSink::bridge();
     let (actions, action_receiver) = sync_channel(4);
     let controller = if smoke_test {
         spawn_smoke_controller(sink)
@@ -39,39 +33,40 @@ fn main() -> ExitCode {
         ..CaptionUiOptions::default()
     };
     let status = run_caption_ui(events, actions, options);
-    let controller_ok = controller.join().is_ok();
-    if status == gtk::glib::ExitCode::SUCCESS && controller_ok {
+    let controller_outcome = controller.join().ok();
+    if application_succeeded(status == gtk::glib::ExitCode::SUCCESS, controller_outcome) {
         ExitCode::SUCCESS
     } else {
         ExitCode::FAILURE
     }
 }
 
-fn spawn_smoke_controller(sink: GtkCaptionSink) -> thread::JoinHandle<()> {
+fn spawn_smoke_controller(sink: GtkCaptionSink) -> thread::JoinHandle<Result<(), String>> {
     thread::spawn(move || {
         thread::sleep(Duration::from_millis(250));
-        publish_demo(&sink, Duration::from_millis(250), None);
+        publish_demo(&sink, Duration::from_millis(250), None)?;
         thread::sleep(Duration::from_millis(400));
-        let _ = sink.quit();
+        sink.quit().map_err(|error| error.to_string())
     })
 }
 
 fn spawn_demo_controller(
     sink: GtkCaptionSink,
     actions: std::sync::mpsc::Receiver<CaptionUiAction>,
-) -> thread::JoinHandle<()> {
+) -> thread::JoinHandle<Result<(), String>> {
     thread::spawn(move || {
         while let Ok(action) = actions.recv() {
             match action {
                 CaptionUiAction::Start { .. } => {
-                    publish_demo(&sink, Duration::from_millis(450), Some(&actions));
+                    publish_demo(&sink, Duration::from_millis(450), Some(&actions))?;
                 }
                 CaptionUiAction::Stop => {
-                    let _ = sink.set_running(false);
+                    sink.set_running(false).map_err(|error| error.to_string())?;
                 }
                 CaptionUiAction::Shutdown => break,
             }
         }
+        Ok(())
     })
 }
 
@@ -79,9 +74,9 @@ fn publish_demo(
     sink: &GtkCaptionSink,
     interval: Duration,
     actions: Option<&std::sync::mpsc::Receiver<CaptionUiAction>>,
-) {
-    let _ = sink.clear_error();
-    let _ = sink.set_running(true);
+) -> Result<(), String> {
+    sink.clear_error().map_err(|error| error.to_string())?;
+    sink.set_running(true).map_err(|error| error.to_string())?;
     let mut state = CaptionState::new();
     let updates = [
         ("Native captions", false),
@@ -94,18 +89,12 @@ fn publish_demo(
         } else {
             TranscriptUpdate::partial(text)
         };
-        let Ok(update) = update else {
-            let _ = sink.show_error("Demo caption was invalid.");
-            break;
-        };
-        let Ok(snapshot) = state.apply(update) else {
-            let _ = sink.show_error("Caption state could not be updated.");
-            break;
-        };
+        let update = update.map_err(|error| error.to_string())?;
+        let snapshot = state.apply(update).map_err(|error| error.to_string())?;
         let mut caption_sink = sink.clone();
-        if caption_sink.publish(snapshot).is_err() {
-            break;
-        }
+        caption_sink
+            .publish(snapshot)
+            .map_err(|error| error.to_string())?;
         let stopped = actions.is_some_and(|actions| match actions.recv_timeout(interval) {
             Ok(CaptionUiAction::Stop)
             | Ok(CaptionUiAction::Shutdown)
@@ -121,5 +110,44 @@ fn publish_demo(
             thread::sleep(interval);
         }
     }
-    let _ = sink.set_running(false);
+    sink.set_running(false).map_err(|error| error.to_string())
+}
+
+fn application_succeeded(
+    gtk_succeeded: bool,
+    controller_outcome: Option<Result<(), String>>,
+) -> bool {
+    gtk_succeeded && matches!(controller_outcome, Some(Ok(())))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use lcrt_ui_gtk::GtkCaptionSink;
+
+    use super::{application_succeeded, publish_demo};
+
+    #[test]
+    fn diagnostic_failure_produces_a_failed_application_outcome() {
+        assert!(!application_succeeded(
+            true,
+            Some(Err("caption publication failed".to_owned()))
+        ));
+        assert!(!application_succeeded(false, Some(Ok(()))));
+        assert!(!application_succeeded(true, None));
+    }
+
+    #[test]
+    fn diagnostic_success_requires_gtk_and_controller_success() {
+        assert!(application_succeeded(true, Some(Ok(()))));
+    }
+
+    #[test]
+    fn demo_reports_bridge_teardown_as_failure() {
+        let (sink, receiver) = GtkCaptionSink::bridge();
+        drop(receiver);
+
+        assert!(publish_demo(&sink, Duration::ZERO, None).is_err());
+    }
 }
